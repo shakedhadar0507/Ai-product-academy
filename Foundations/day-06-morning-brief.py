@@ -64,26 +64,31 @@ def get_todays_events():
 
 
 def main():
-    temperature, windspeed = get_weather(LATITUDE, LONGITUDE)
-    events = get_todays_events()
-
     today = datetime.date.today().isoformat()
 
     print("=== Morning Briefing ===")
     print(f"Date: {today}")
     print()
     print("Weather in Tel Aviv:")
-    print(f"  Temperature: {temperature}°C")
-    print(f"  Wind speed: {windspeed} km/h")
+    try:
+        temperature, windspeed = get_weather(LATITUDE, LONGITUDE)
+        print(f"  Temperature: {temperature}°C")
+        print(f"  Wind speed: {windspeed} km/h")
+    except Exception:
+        print("Could not fetch weather")
     print()
     print("Today's calendar events:")
-    if not events:
-        print("  No events found for today.")
-    else:
-        for event in events:
-            start = event["start"].get("dateTime", event["start"].get("date"))
-            title = event.get("summary", "(no title)")
-            print(f"  {start} - {title}")
+    try:
+        events = get_todays_events()
+        if not events:
+            print("  No events found for today.")
+        else:
+            for event in events:
+                start = event["start"].get("dateTime", event["start"].get("date"))
+                title = event.get("summary", "(no title)")
+                print(f"  {start} - {title}")
+    except Exception:
+        print("Could not fetch calendar events")
 
 
 if __name__ == "__main__":
