@@ -3,3 +3,4 @@ token.json
 training_log.db
 __pycache__/
 *.pyc
+.env

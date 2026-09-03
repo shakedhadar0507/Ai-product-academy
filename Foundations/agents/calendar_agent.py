@@ -1,10 +1,14 @@
 import datetime
 import os
 
+import anthropic
+from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+load_dotenv()
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
@@ -44,4 +48,29 @@ def get_data():
 
 
 def get_insight(data):
-    return "AI insight coming soon"
+    try:
+        client = anthropic.Anthropic()
+
+        events_summary = "\n".join(
+            f"- {event.get('summary', '(no title)')} at "
+            f"{event['start'].get('dateTime', event['start'].get('date'))}"
+            for event in data
+        ) or "(no events today)"
+
+        response = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=300,
+            output_config={"effort": "low"},
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Given these calendar events for today, give one practical, "
+                    "specific suggestion in Hebrew about time management or "
+                    "conflicts, max 2 sentences:\n\n" + events_summary
+                ),
+            }],
+        )
+
+        return next(block.text for block in response.content if block.type == "text")
+    except Exception:
+        return "Could not generate insight"
