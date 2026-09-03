@@ -1,39 +1,16 @@
-import os
 import sqlite3
 
 import requests
 from flask import Flask
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from agents import calendar_agent
+from agents import calendar_agent, google_auth
 
 app = Flask(__name__)
 
 LATITUDE = 32.08
 LONGITUDE = 34.78
-SCOPES = [
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/gmail.readonly",
-]
 DB_FILE = "training_log.db"
-
-
-def get_credentials():
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open("token.json", "w") as token_file:
-            token_file.write(creds.to_json())
-    return creds
 
 
 def get_weather(latitude, longitude):
@@ -119,7 +96,7 @@ def dashboard():
 
     html.append("<h2>Unread Emails</h2>")
     try:
-        creds = get_credentials()
+        creds = google_auth.get_credentials(google_auth.SCOPES)
         emails = get_unread_emails(creds)
         if not emails:
             html.append("<p>No unread emails found.</p>")
