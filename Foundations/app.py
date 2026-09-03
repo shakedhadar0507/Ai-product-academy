@@ -1,4 +1,3 @@
-import datetime
 import os
 import sqlite3
 
@@ -8,6 +7,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+from agents import calendar_agent
 
 app = Flask(__name__)
 
@@ -47,24 +48,6 @@ def get_weather(latitude, longitude):
     temperature = data["current_weather"]["temperature"]
     windspeed = data["current_weather"]["windspeed"]
     return temperature, windspeed
-
-
-def get_todays_events(creds):
-    service = build("calendar", "v3", credentials=creds)
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
-
-    events_result = service.events().list(
-        calendarId="primary",
-        timeMin=start_of_day,
-        timeMax=end_of_day,
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-
-    return events_result.get("items", [])
 
 
 def get_header(headers, name):
@@ -119,8 +102,8 @@ def dashboard():
 
     html.append("<h2>Today's Calendar Events</h2>")
     try:
-        creds = get_credentials()
-        events = get_todays_events(creds)
+        events = calendar_agent.get_data()
+        insight = calendar_agent.get_insight(events)
         if not events:
             html.append("<p>No events found for today.</p>")
         else:
@@ -130,6 +113,7 @@ def dashboard():
                 title = event.get("summary", "(no title)")
                 items.append(f"<li>{start} - {title}</li>")
             html.append("<ul>" + "".join(items) + "</ul>")
+        html.append(f"<p><em>Insight: {insight}</em></p>")
     except Exception:
         html.append("<p>Could not fetch calendar events</p>")
 
