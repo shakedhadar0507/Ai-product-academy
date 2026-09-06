@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import sys
 from datetime import date
 
 import requests
@@ -143,7 +144,8 @@ def dashboard():
             f"Temperature: <span class='font-medium text-slate-800'>{temperature}&deg;C</span>",
             f"Wind speed: <span class='font-medium text-slate-800'>{windspeed} km/h</span>",
         ])
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] weather: {e}", file=sys.stderr)
         body = render_error("Could not fetch weather")
     cards.append(render_card("☀️", "Weather in Tel Aviv", body))
 
@@ -184,7 +186,8 @@ def dashboard():
         </div>
         """
         body = events_html + insight_html
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] calendar: {e}", file=sys.stderr)
         body = render_error("Could not fetch calendar events")
     cards.append(render_card("📅", "Today's Calendar", body))
 
@@ -201,7 +204,8 @@ def dashboard():
         sections.append(render_email_bucket("Everything Else", other_count, other_subjects))
 
         body = "<div class='flex flex-col gap-4'>" + "".join(sections) + "</div>"
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] inbox: {e}", file=sys.stderr)
         body = render_error("Could not fetch emails")
     cards.append(render_card("📧", "Inbox Overview", body))
 
@@ -223,7 +227,8 @@ def dashboard():
                 f"<p class='mt-3 text-sm font-semibold text-slate-700'>"
                 f"Total distance: {total_distance} km</p>"
             )
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] training_log: {e}", file=sys.stderr)
         body = render_error("Could not fetch training log")
 
     try:
@@ -235,7 +240,8 @@ def dashboard():
           <p class="text-emerald-900 text-sm">{running_insight}</p>
         </div>
         """
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] running_insight: {e}", file=sys.stderr)
         insight_html = render_error("Could not generate running insight")
     body += insight_html
 

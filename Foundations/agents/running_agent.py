@@ -1,3 +1,5 @@
+import sys
+
 import anthropic
 import requests
 from dotenv import load_dotenv
@@ -45,5 +47,6 @@ def get_insight(data):
         )
 
         return next(block.text for block in response.content if block.type == "text")
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] running_insight: {e}", file=sys.stderr)
         return "Could not generate running insight"
