@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import traceback
 
 import requests
 from flask import Flask
@@ -62,6 +61,17 @@ def get_unread_emails(creds, max_results=5):
 
 def get_training_log():
     with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                distance_km REAL NOT NULL,
+                duration_min INTEGER NOT NULL,
+                notes TEXT
+            )
+            """
+        )
         rows = conn.execute(
             "SELECT date, distance_km, duration_min, notes FROM runs ORDER BY date"
         ).fetchall()
@@ -94,7 +104,6 @@ def dashboard():
             html.append("<ul>" + "".join(items) + "</ul>")
         html.append(f"<p><em>Insight: {insight}</em></p>")
     except Exception:
-        traceback.print_exc()
         html.append("<p>Could not fetch calendar events</p>")
 
     html.append("<h2>Unread Emails</h2>")
@@ -112,7 +121,6 @@ def dashboard():
                 items.append(f"<li>{sender} - {subject}</li>")
             html.append("<ul>" + "".join(items) + "</ul>")
     except Exception:
-        traceback.print_exc()
         html.append("<p>Could not fetch unread emails</p>")
 
     html.append("<h2>Training Log</h2>")
@@ -129,7 +137,6 @@ def dashboard():
             html.append("<ul>" + "".join(items) + "</ul>")
             html.append(f"<p>Total distance: {total_distance} km</p>")
     except Exception:
-        traceback.print_exc()
         html.append("<p>Could not fetch training log</p>")
 
     return "\n".join(html)
