@@ -33,8 +33,9 @@ def get_insight(data):
         client = anthropic.Anthropic()
 
         events_summary = "\n".join(
-            f"- {event.get('summary', '(no title)')} at "
-            f"{event['start'].get('dateTime', event['start'].get('date'))}"
+            f"- {event.get('summary', '(no title)')}: "
+            f"{event['start'].get('dateTime', event['start'].get('date'))} to "
+            f"{event['end'].get('dateTime', event['end'].get('date'))}"
             for event in data
         ) or "(no events today)"
 
@@ -45,9 +46,15 @@ def get_insight(data):
             messages=[{
                 "role": "user",
                 "content": (
-                    "Given these calendar events for today, give one practical, "
-                    "specific suggestion in Hebrew about time management or "
-                    "conflicts, max 2 sentences:\n\n" + events_summary
+                    "Here is today's calendar. Focus only on events that genuinely "
+                    "need attention: scheduling conflicts, back-to-back meetings with "
+                    "no buffer between them, or significant events that need prep. "
+                    "Briefly acknowledge trivial or passive items (like reading a "
+                    "newsletter) without analyzing them, or skip them entirely if "
+                    "there's nothing notable. If nothing needs attention, say so in "
+                    "one short sentence instead of manufacturing a suggestion. Give "
+                    "one calibrated, practical insight in Hebrew, max 2-3 "
+                    "sentences:\n\n" + events_summary
                 ),
             }],
         )

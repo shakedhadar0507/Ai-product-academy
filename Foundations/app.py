@@ -1,8 +1,9 @@
 import os
 import sqlite3
+from datetime import datetime
 
 import requests
-from flask import Flask
+from flask import Flask, redirect, request, url_for
 from googleapiclient.discovery import build
 
 from agents import calendar_agent, google_auth
@@ -59,23 +60,43 @@ def get_unread_emails(creds, max_results=5):
     return emails
 
 
+RUNS_TABLE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        distance_km REAL NOT NULL,
+        duration_min INTEGER NOT NULL,
+        notes TEXT
+    )
+"""
+
+
 def get_training_log():
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                distance_km REAL NOT NULL,
-                duration_min INTEGER NOT NULL,
-                notes TEXT
-            )
-            """
-        )
+        conn.execute(RUNS_TABLE_SCHEMA)
         rows = conn.execute(
             "SELECT date, distance_km, duration_min, notes FROM runs ORDER BY date"
         ).fetchall()
     return rows
+
+
+def add_training_run(date, distance_km, duration_min, notes):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(RUNS_TABLE_SCHEMA)
+        conn.execute(
+            "INSERT INTO runs (date, distance_km, duration_min, notes) VALUES (?, ?, ?, ?)",
+            (date, distance_km, duration_min, notes),
+        )
+
+
+def format_event_time(event):
+    start = event["start"].get("dateTime")
+    end = event["end"].get("dateTime")
+    if not start or not end:
+        return "All day"
+    start_time = datetime.fromisoformat(start).strftime("%H:%M")
+    end_time = datetime.fromisoformat(end).strftime("%H:%M")
+    return f"{start_time}–{end_time}"
 
 
 def render_card(icon, title, body_html):
@@ -121,9 +142,9 @@ def dashboard():
         else:
             items = []
             for event in events:
-                start = event["start"].get("dateTime", event["start"].get("date"))
+                time_range = format_event_time(event)
                 title = event.get("summary", "(no title)")
-                items.append(f"<span class='text-slate-400'>{start}</span> &mdash; {title}")
+                items.append(f"<span class='text-slate-400'>{time_range}</span> &mdash; {title}")
             events_html = render_list(items)
         insight_html = f"""
         <div class="mt-3 bg-indigo-50 border-l-4 border-indigo-400 rounded-r-lg p-3">
@@ -173,6 +194,24 @@ def dashboard():
             )
     except Exception:
         body = render_error("Could not fetch training log")
+    body += """
+    <form method="POST" action="/add-run" class="mt-4 border-t border-slate-100 pt-4 flex flex-col gap-2">
+      <div class="grid grid-cols-2 gap-2">
+        <input type="date" name="date" required
+               class="col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <input type="number" step="0.01" min="0" name="distance_km" placeholder="Distance (km)" required
+               class="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <input type="number" min="0" name="duration_min" placeholder="Duration (min)" required
+               class="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <input type="text" name="notes" placeholder="Notes"
+               class="col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+      </div>
+      <button type="submit"
+              class="bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors">
+        Add Run
+      </button>
+    </form>
+    """
     cards.append(render_card("🏃", "Training Log", body))
 
     return f"""
@@ -198,6 +237,16 @@ def dashboard():
     </body>
     </html>
     """
+
+
+@app.route("/add-run", methods=["POST"])
+def add_run():
+    date = request.form["date"]
+    distance_km = float(request.form["distance_km"])
+    duration_min = int(request.form["duration_min"])
+    notes = request.form.get("notes", "")
+    add_training_run(date, distance_km, duration_min, notes)
+    return redirect(url_for("dashboard"))
 
 
 if __name__ == "__main__":
