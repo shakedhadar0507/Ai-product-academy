@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import traceback
 
 import requests
 from flask import Flask
@@ -93,6 +94,7 @@ def dashboard():
             html.append("<ul>" + "".join(items) + "</ul>")
         html.append(f"<p><em>Insight: {insight}</em></p>")
     except Exception:
+        traceback.print_exc()
         html.append("<p>Could not fetch calendar events</p>")
 
     html.append("<h2>Unread Emails</h2>")
@@ -110,6 +112,7 @@ def dashboard():
                 items.append(f"<li>{sender} - {subject}</li>")
             html.append("<ul>" + "".join(items) + "</ul>")
     except Exception:
+        traceback.print_exc()
         html.append("<p>Could not fetch unread emails</p>")
 
     html.append("<h2>Training Log</h2>")
@@ -126,6 +129,7 @@ def dashboard():
             html.append("<ul>" + "".join(items) + "</ul>")
             html.append(f"<p>Total distance: {total_distance} km</p>")
     except Exception:
+        traceback.print_exc()
         html.append("<p>Could not fetch training log</p>")
 
     return "\n".join(html)
