@@ -3,11 +3,10 @@ import sqlite3
 import sys
 from datetime import date
 
-import requests
 from flask import Flask, redirect, request, url_for
 from googleapiclient.discovery import build
 
-from agents import calendar_agent, formatting, google_auth, running_agent
+from agents import calendar_agent, formatting, google_auth, running_agent, weather_agent
 
 app = Flask(__name__)
 
@@ -15,20 +14,6 @@ LATITUDE = 32.08
 LONGITUDE = 34.78
 DB_FILE = "training_log.db"
 MARATHON_DATE = date(2026, 11, 1)
-
-
-def get_weather(latitude, longitude):
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current_weather": True,
-    }
-    response = requests.get(url, params=params)
-    data = response.json()
-    temperature = data["current_weather"]["temperature"]
-    windspeed = data["current_weather"]["windspeed"]
-    return temperature, windspeed
 
 
 def get_header(headers, name):
@@ -139,10 +124,10 @@ def dashboard():
     cards = []
 
     try:
-        temperature, windspeed = get_weather(LATITUDE, LONGITUDE)
+        weather = weather_agent.get_current_weather(LATITUDE, LONGITUDE)
         body = render_list([
-            f"Temperature: <span class='font-medium text-slate-800'>{temperature}&deg;C</span>",
-            f"Wind speed: <span class='font-medium text-slate-800'>{windspeed} km/h</span>",
+            f"Temperature: <span class='font-medium text-slate-800'>{weather['temperature']}&deg;C</span>",
+            f"Wind speed: <span class='font-medium text-slate-800'>{weather['windspeed']} km/h</span>",
         ])
     except Exception as e:
         print(f"[ERROR] weather: {e}", file=sys.stderr)

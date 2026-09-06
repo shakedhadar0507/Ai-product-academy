@@ -1,29 +1,15 @@
 import sys
 
 import anthropic
-import requests
 from dotenv import load_dotenv
+
+from agents import weather_agent
 
 load_dotenv()
 
-LATITUDE = 32.08
-LONGITUDE = 34.78
 
-
-def get_data(latitude=LATITUDE, longitude=LONGITUDE):
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current": "temperature_2m,relative_humidity_2m,wind_speed_10m",
-    }
-    response = requests.get(url, params=params)
-    current = response.json()["current"]
-    return {
-        "temperature": current["temperature_2m"],
-        "humidity": current["relative_humidity_2m"],
-        "windspeed": current["wind_speed_10m"],
-    }
+def get_data():
+    return weather_agent.get_current_weather()
 
 
 def get_insight(data):
