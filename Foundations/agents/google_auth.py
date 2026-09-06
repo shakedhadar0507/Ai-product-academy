@@ -11,15 +11,20 @@ SCOPES = [
 
 
 def get_credentials(scopes):
+    token_path = "/etc/secrets/token.json" if os.path.exists("/etc/secrets/token.json") else "token.json"
+    credentials_path = (
+        "/etc/secrets/credentials.json" if os.path.exists("/etc/secrets/credentials.json") else "credentials.json"
+    )
+
     creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", scopes)
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, scopes)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", scopes)
+            flow = InstalledAppFlow.from_client_secrets_file(credentials_path, scopes)
             creds = flow.run_local_server(port=0)
-        with open("token.json", "w") as token_file:
+        with open(token_path, "w") as token_file:
             token_file.write(creds.to_json())
     return creds
