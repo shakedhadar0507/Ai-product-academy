@@ -37,28 +37,37 @@ def get_header(headers, name):
     return "(unknown)"
 
 
-def get_unread_emails(creds, max_results=5):
-    service = build("gmail", "v1", credentials=creds)
+EMAIL_LABEL_BUCKETS = [
+    ("לימודים", "label:לימודים"),
+    ("RFS", "label:RFS"),
+    ("פיננסים", "label:פיננסים"),
+]
+OTHER_EMAIL_QUERY = "in:inbox is:unread category:primary -label:לימודים -label:RFS -label:פיננסים"
 
-    results = service.users().messages().list(
-        userId="me",
-        labelIds=["UNREAD", "INBOX"],
-        maxResults=max_results,
-    ).execute()
 
-    message_refs = results.get("messages", [])
+def get_email_bucket(service, query, sample_size=3):
+    message_ids = []
+    page_token = None
+    while True:
+        response = service.users().messages().list(
+            userId="me", q=query, pageToken=page_token, maxResults=500
+        ).execute()
+        message_ids.extend(message["id"] for message in response.get("messages", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
 
-    emails = []
-    for ref in message_refs:
+    subjects = []
+    for message_id in message_ids[:sample_size]:
         message = service.users().messages().get(
             userId="me",
-            id=ref["id"],
+            id=message_id,
             format="metadata",
-            metadataHeaders=["From", "Subject"],
+            metadataHeaders=["Subject"],
         ).execute()
-        emails.append(message)
+        subjects.append(get_header(message["payload"]["headers"], "Subject"))
 
-    return emails
+    return len(message_ids), subjects
 
 
 RUNS_TABLE_SCHEMA = """
@@ -109,6 +118,19 @@ def render_list(items_html):
     return '<ul class="flex flex-col gap-2">' + "".join(
         f'<li class="border-b border-slate-100 last:border-0 pb-2 last:pb-0">{item}</li>' for item in items_html
     ) + "</ul>"
+
+
+def render_email_bucket(name, count, subjects):
+    if count == 0:
+        body = "<p class='text-slate-400 text-sm'>No emails</p>"
+    else:
+        body = render_list([f"<span class='text-sm'>{subject}</span>" for subject in subjects])
+    return f"""
+    <div>
+      <p class="text-sm font-semibold text-slate-700 mb-1">{name} <span class="text-slate-400 font-normal">({count})</span></p>
+      {body}
+    </div>
+    """
 
 
 @app.route("/")
@@ -168,20 +190,20 @@ def dashboard():
 
     try:
         creds = google_auth.get_credentials(google_auth.SCOPES)
-        emails = get_unread_emails(creds)
-        if not emails:
-            body = "<p class='text-slate-400'>No unread emails found.</p>"
-        else:
-            items = []
-            for email in emails:
-                headers = email["payload"]["headers"]
-                sender = get_header(headers, "From")
-                subject = get_header(headers, "Subject")
-                items.append(f"<span class='font-medium text-slate-800'>{sender}</span><br>{subject}")
-            body = render_list(items)
+        service = build("gmail", "v1", credentials=creds)
+
+        sections = []
+        for label_name, query in EMAIL_LABEL_BUCKETS:
+            count, subjects = get_email_bucket(service, query)
+            sections.append(render_email_bucket(label_name, count, subjects))
+
+        other_count, other_subjects = get_email_bucket(service, OTHER_EMAIL_QUERY)
+        sections.append(render_email_bucket("Everything Else", other_count, other_subjects))
+
+        body = "<div class='flex flex-col gap-4'>" + "".join(sections) + "</div>"
     except Exception:
-        body = render_error("Could not fetch unread emails")
-    cards.append(render_card("📧", "Unread Emails", body))
+        body = render_error("Could not fetch emails")
+    cards.append(render_card("📧", "Inbox Overview", body))
 
     try:
         rows = get_training_log()
