@@ -1,5 +1,6 @@
 import datetime
 import sys
+import time
 
 import anthropic
 from dotenv import load_dotenv
@@ -8,6 +9,10 @@ from googleapiclient.discovery import build
 from agents import google_auth
 
 load_dotenv()
+
+CACHE_TTL_SECONDS = 600
+
+_insight_cache = {}
 
 
 def get_data():
@@ -30,6 +35,11 @@ def get_data():
 
 
 def get_insight(data):
+    today = datetime.date.today().isoformat()
+    cached = _insight_cache.get(today)
+    if cached and time.time() - cached[0] < CACHE_TTL_SECONDS:
+        return cached[1]
+
     try:
         client = anthropic.Anthropic()
 
@@ -60,7 +70,10 @@ def get_insight(data):
             }],
         )
 
-        return next(block.text for block in response.content if block.type == "text")
+        insight = next(block.text for block in response.content if block.type == "text")
     except Exception as e:
         print(f"[ERROR] calendar_insight: {e}", file=sys.stderr)
-        return "Could not generate insight"
+        insight = "Could not generate insight"
+
+    _insight_cache[today] = (time.time(), insight)
+    return insight

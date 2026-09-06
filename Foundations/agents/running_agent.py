@@ -1,4 +1,5 @@
 import sys
+import time
 
 import anthropic
 from dotenv import load_dotenv
@@ -7,12 +8,20 @@ from agents import weather_agent
 
 load_dotenv()
 
+CACHE_TTL_SECONDS = 600
+
+_insight_cache = {}
+
 
 def get_data():
     return weather_agent.get_current_weather()
 
 
 def get_insight(data):
+    cached = _insight_cache.get("insight")
+    if cached and time.time() - cached[0] < CACHE_TTL_SECONDS:
+        return cached[1]
+
     try:
         client = anthropic.Anthropic()
 
@@ -32,7 +41,10 @@ def get_insight(data):
             }],
         )
 
-        return next(block.text for block in response.content if block.type == "text")
+        insight = next(block.text for block in response.content if block.type == "text")
     except Exception as e:
         print(f"[ERROR] running_insight: {e}", file=sys.stderr)
-        return "Could not generate running insight"
+        insight = "Could not generate running insight"
+
+    _insight_cache["insight"] = (time.time(), insight)
+    return insight
