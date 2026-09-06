@@ -1,18 +1,19 @@
 import os
 import sqlite3
-from datetime import datetime
+from datetime import date
 
 import requests
 from flask import Flask, redirect, request, url_for
 from googleapiclient.discovery import build
 
-from agents import calendar_agent, google_auth
+from agents import calendar_agent, formatting, google_auth, running_agent
 
 app = Flask(__name__)
 
 LATITUDE = 32.08
 LONGITUDE = 34.78
 DB_FILE = "training_log.db"
+MARATHON_DATE = date(2026, 11, 1)
 
 
 def get_weather(latitude, longitude):
@@ -80,23 +81,13 @@ def get_training_log():
     return rows
 
 
-def add_training_run(date, distance_km, duration_min, notes):
+def add_training_run(run_date, distance_km, duration_min, notes):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(RUNS_TABLE_SCHEMA)
         conn.execute(
             "INSERT INTO runs (date, distance_km, duration_min, notes) VALUES (?, ?, ?, ?)",
-            (date, distance_km, duration_min, notes),
+            (run_date, distance_km, duration_min, notes),
         )
-
-
-def format_event_time(event):
-    start = event["start"].get("dateTime")
-    end = event["end"].get("dateTime")
-    if not start or not end:
-        return "All day"
-    start_time = datetime.fromisoformat(start).strftime("%H:%M")
-    end_time = datetime.fromisoformat(end).strftime("%H:%M")
-    return f"{start_time}–{end_time}"
 
 
 def render_card(icon, title, body_html):
@@ -134,6 +125,22 @@ def dashboard():
         body = render_error("Could not fetch weather")
     cards.append(render_card("☀️", "Weather in Tel Aviv", body))
 
+    days_remaining = (MARATHON_DATE - date.today()).days
+    if days_remaining > 0:
+        countdown_html = (
+            f"<span class='text-3xl font-bold text-indigo-600'>{days_remaining}</span> "
+            f"<span class='text-slate-500'>days to go</span>"
+        )
+    elif days_remaining == 0:
+        countdown_html = "<span class='text-lg font-semibold text-indigo-600'>Race day is today! 🎉</span>"
+    else:
+        countdown_html = "<p class='text-slate-400'>The marathon has passed.</p>"
+    body = (
+        f"<div class='flex flex-col gap-1'>{countdown_html}"
+        f"<p class='text-sm text-slate-400'>NYC Marathon &mdash; {MARATHON_DATE.strftime('%d/%m/%Y')}</p></div>"
+    )
+    cards.append(render_card("🏁", "Marathon Countdown", body))
+
     try:
         events = calendar_agent.get_data()
         insight = calendar_agent.get_insight(events)
@@ -142,7 +149,9 @@ def dashboard():
         else:
             items = []
             for event in events:
-                time_range = format_event_time(event)
+                time_range = formatting.format_time_range(
+                    event["start"].get("dateTime"), event["end"].get("dateTime")
+                )
                 title = event.get("summary", "(no title)")
                 items.append(f"<span class='text-slate-400'>{time_range}</span> &mdash; {title}")
             events_html = render_list(items)
@@ -181,9 +190,9 @@ def dashboard():
         else:
             items = []
             total_distance = 0
-            for date, distance_km, duration_min, notes in rows:
+            for run_date, distance_km, duration_min, notes in rows:
                 items.append(
-                    f"<span class='text-slate-400'>{date}</span> &mdash; "
+                    f"<span class='text-slate-400'>{formatting.format_date(run_date)}</span> &mdash; "
                     f"<span class='font-medium text-slate-800'>{distance_km} km</span> "
                     f"in {duration_min} min &middot; {notes}"
                 )
@@ -194,6 +203,20 @@ def dashboard():
             )
     except Exception:
         body = render_error("Could not fetch training log")
+
+    try:
+        weather_data = running_agent.get_data()
+        running_insight = running_agent.get_insight(weather_data)
+        insight_html = f"""
+        <div class="mt-3 bg-emerald-50 border-l-4 border-emerald-400 rounded-r-lg p-3">
+          <p class="text-xs uppercase tracking-wide text-emerald-600 font-semibold mb-1">Should You Run Today?</p>
+          <p class="text-emerald-900 text-sm">{running_insight}</p>
+        </div>
+        """
+    except Exception:
+        insight_html = render_error("Could not generate running insight")
+    body += insight_html
+
     body += """
     <form method="POST" action="/add-run" class="mt-4 border-t border-slate-100 pt-4 flex flex-col gap-2">
       <div class="grid grid-cols-2 gap-2">
@@ -241,11 +264,11 @@ def dashboard():
 
 @app.route("/add-run", methods=["POST"])
 def add_run():
-    date = request.form["date"]
+    run_date = request.form["date"]
     distance_km = float(request.form["distance_km"])
     duration_min = int(request.form["duration_min"])
     notes = request.form.get("notes", "")
-    add_training_run(date, distance_km, duration_min, notes)
+    add_training_run(run_date, distance_km, duration_min, notes)
     return redirect(url_for("dashboard"))
 
 
