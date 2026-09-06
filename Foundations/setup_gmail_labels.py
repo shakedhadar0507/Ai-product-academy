@@ -20,7 +20,14 @@ LABEL_DEFINITIONS = [
         "criteria": {"from": "HarelInsurance@harel-group.co.il"},
         "query": "from:HarelInsurance@harel-group.co.il",
     },
+    {
+        "label": "לא רלוונטי",
+        "criteria": {"query": "category:social OR category:updates OR category:forums OR category:promotions OR in:spam"},
+        "query": "category:social OR category:updates OR category:forums OR category:promotions OR in:spam",
+    },
 ]
+
+VISIBLE_LABELS = ["עבודה", "קבלות", "לא רלוונטי"]
 
 
 def get_or_create_label(service, name):
@@ -72,6 +79,18 @@ def label_existing_messages(service, query, label_id):
     return len(message_ids)
 
 
+def set_label_visibility(service, name, visibility="labelShow"):
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    label = next((label for label in labels if label["name"] == name), None)
+    if not label:
+        print(f"{name}: label not found, skipping visibility update")
+        return
+    service.users().labels().patch(
+        userId="me", id=label["id"], body={"labelListVisibility": visibility}
+    ).execute()
+    print(f"{name}: labelListVisibility set to {visibility}")
+
+
 def main():
     creds = google_auth.get_credentials(google_auth.SCOPES)
     service = build("gmail", "v1", credentials=creds)
@@ -82,6 +101,9 @@ def main():
         labeled_count = label_existing_messages(service, definition["query"], label_id)
         filter_status = "created" if filter_created else "already existed"
         print(f"{definition['label']}: filter {filter_status}, {labeled_count} existing emails labeled")
+
+    for label_name in VISIBLE_LABELS:
+        set_label_visibility(service, label_name)
 
 
 if __name__ == "__main__":
