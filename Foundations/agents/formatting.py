@@ -1,4 +1,6 @@
+import sys
 from datetime import datetime
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 DEFAULT_TZ_NAME = "Asia/Jerusalem"
@@ -6,12 +8,20 @@ ISRAEL_TZ = ZoneInfo(DEFAULT_TZ_NAME)
 
 
 def resolve_tz_name(tz_name):
-    """Return tz_name if it's a valid IANA zone, otherwise fall back to the default timezone."""
-    try:
-        ZoneInfo(tz_name)
-        return tz_name
-    except Exception:
-        return DEFAULT_TZ_NAME
+    """Return tz_name if it's a valid IANA zone. Recovers values that were
+    accidentally URL-encoded (e.g. 'America%2FNew_York') before giving up and
+    falling back to the default timezone, which is logged so it's visible in
+    server logs instead of silently masking the real value."""
+    for candidate in (tz_name, unquote(tz_name) if tz_name else None):
+        if not candidate:
+            continue
+        try:
+            ZoneInfo(candidate)
+            return candidate
+        except Exception:
+            continue
+    print(f"[WARN] resolve_tz_name: invalid tz_name {tz_name!r}, falling back to {DEFAULT_TZ_NAME}", file=sys.stderr)
+    return DEFAULT_TZ_NAME
 
 
 def now_in_tz(tz_name=DEFAULT_TZ_NAME):

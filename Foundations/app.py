@@ -332,11 +332,15 @@ def dashboard():
       <script>
         (function() {{
           try {{
+            // IANA zone names only ever contain letters, digits, '/', '_', '+', '-' —
+            // all valid unencoded in a cookie value — so this is intentionally stored
+            // raw, not percent-encoded, and must be read back raw (no decodeURIComponent)
+            // for the comparison below to actually match and to match what the server reads.
             var detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
             var match = document.cookie.match(/(?:^|;\\s*)user_tz=([^;]*)/);
-            var current = match ? decodeURIComponent(match[1]) : null;
+            var current = match ? match[1] : null;
             if (detected && detected !== current) {{
-              document.cookie = "user_tz=" + encodeURIComponent(detected) + ";path=/;max-age=31536000;SameSite=Lax";
+              document.cookie = "user_tz=" + detected + ";path=/;max-age=31536000;SameSite=Lax";
               location.reload();
             }}
           }} catch (e) {{}}
