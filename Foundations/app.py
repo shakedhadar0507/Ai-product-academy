@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, redirect, request, url_for
 from googleapiclient.discovery import build
 
-from agents import calendar_agent, formatting, google_auth, running_agent, weather_agent
+from agents import brief_agent, calendar_agent, formatting, google_auth, running_agent, weather_agent
 
 load_dotenv()
 
@@ -144,11 +144,12 @@ def render_email_bucket(name, count, subjects):
 def dashboard():
     cards = []
 
+    weather_result = None
     try:
-        weather = weather_agent.get_current_weather(LATITUDE, LONGITUDE)
+        weather_result = weather_agent.get_current_weather(LATITUDE, LONGITUDE)
         body = render_list([
-            f"Temperature: <span class='font-medium text-slate-800'>{weather['temperature']}&deg;C</span>",
-            f"Wind speed: <span class='font-medium text-slate-800'>{weather['windspeed']} km/h</span>",
+            f"Temperature: <span class='font-medium text-slate-800'>{weather_result['temperature']}&deg;C</span>",
+            f"Wind speed: <span class='font-medium text-slate-800'>{weather_result['windspeed']} km/h</span>",
         ])
     except Exception as e:
         print(f"[ERROR] weather: {e}", file=sys.stderr)
@@ -171,8 +172,10 @@ def dashboard():
     )
     cards.append(render_card("🏁", "Marathon Countdown", body))
 
+    calendar_result = None
     try:
         events = calendar_agent.get_data()
+        calendar_result = events
         insight = calendar_agent.get_insight(events)
         if not events:
             events_html = "<p class='text-slate-400'>No events found for today.</p>"
@@ -197,26 +200,33 @@ def dashboard():
         body = render_error("Could not fetch calendar events")
     cards.append(render_card("📅", "Today's Calendar", body))
 
+    email_result = None
     try:
         creds = google_auth.get_credentials(google_auth.SCOPES)
         service = build("gmail", "v1", credentials=creds)
 
+        bucket_data = []
         sections = []
         for label_name, query in EMAIL_LABEL_BUCKETS:
             count, subjects = get_email_bucket(service, query)
+            bucket_data.append((label_name, count, subjects))
             sections.append(render_email_bucket(label_name, count, subjects))
 
         other_count, other_subjects = get_email_bucket(service, OTHER_EMAIL_QUERY)
+        bucket_data.append(("Everything Else", other_count, other_subjects))
         sections.append(render_email_bucket("Everything Else", other_count, other_subjects))
 
+        email_result = bucket_data
         body = "<div class='flex flex-col gap-4'>" + "".join(sections) + "</div>"
     except Exception as e:
         print(f"[ERROR] inbox: {e}", file=sys.stderr)
         body = render_error("Could not fetch emails")
     cards.append(render_card("📧", "Inbox Overview", body))
 
+    training_result = None
     try:
         rows = get_training_log()
+        training_result = rows
         if not rows:
             body = "<p class='text-slate-400'>No runs logged yet.</p>"
         else:
@@ -236,6 +246,21 @@ def dashboard():
     except Exception as e:
         print(f"[ERROR] training_log: {e}", file=sys.stderr)
         body = render_error("Could not fetch training log")
+
+    try:
+        brief = brief_agent.get_insight(calendar_result, weather_result, email_result, training_result)
+        brief_body = f"<p class='text-lg leading-relaxed'>{brief}</p>"
+    except Exception as e:
+        print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
+        brief_body = "<p class='text-lg text-indigo-100 italic'>Could not generate daily brief</p>"
+    cards.insert(0, f"""
+    <section class="md:col-span-2 lg:col-span-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl shadow-lg p-8 flex flex-col gap-3">
+      <h2 class="flex items-center gap-2 text-xl font-bold">
+        <span class="text-3xl">🧭</span> Daily Brief
+      </h2>
+      {brief_body}
+    </section>
+    """)
 
     try:
         weather_data = running_agent.get_data()
