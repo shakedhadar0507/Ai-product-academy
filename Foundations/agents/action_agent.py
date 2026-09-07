@@ -19,6 +19,34 @@ TOOLS = [
                 "start_time": {"type": "string", "description": "Start time, in 24-hour HH:MM format"},
                 "end_time": {"type": "string", "description": "End time, in 24-hour HH:MM format"},
                 "description": {"type": "string", "description": "Optional event description"},
+                "color": {
+                    "type": "string",
+                    "description": (
+                        "Optional color for the event, as a plain color name (e.g. 'red', 'blue', "
+                        "'green', 'purple', 'yellow', 'orange', 'pink', 'gray'). Only include this "
+                        "if the user explicitly asks for a specific color."
+                    ),
+                },
+                "recurrence": {
+                    "type": "string",
+                    "description": (
+                        "Optional recurrence rule, as a full RRULE string (e.g. "
+                        "'RRULE:FREQ=WEEKLY;BYDAY=MO' for 'every Monday', 'RRULE:FREQ=DAILY' for "
+                        "'every day', 'RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR' for 'every Monday, "
+                        "Wednesday and Friday'). Translate the user's plain-language recurrence "
+                        "request into a valid RRULE string yourself. Only include this if the user "
+                        "explicitly asks for a repeating event."
+                    ),
+                },
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional list of email addresses to invite to the event. Google Calendar "
+                        "automatically sends each of them a real invitation email — only include "
+                        "this if the user explicitly asks to invite someone by their email address."
+                    ),
+                },
             },
             "required": ["summary", "date", "start_time", "end_time"],
         },
@@ -37,6 +65,15 @@ TOOLS = [
         },
     },
 ]
+
+SYSTEM_PROMPT = (
+    "You help manage a personal calendar and inbox by calling the tools available "
+    "to you. If the user's message contains multiple distinct requests, call the "
+    "relevant tool once per distinct request — even if it is the same tool called "
+    "multiple times (for example, two separate calendar events, or an event plus a "
+    "draft). Do not merge multiple requests into a single tool call, and do not "
+    "skip any of them."
+)
 
 
 def _build_tool_functions(tz_name):
@@ -57,6 +94,7 @@ def handle_request(user_text, tz_name=formatting.DEFAULT_TZ_NAME):
         response = client.messages.create(
             model="claude-sonnet-5",
             max_tokens=500,
+            system=SYSTEM_PROMPT,
             tools=TOOLS,
             messages=messages,
         )
@@ -89,6 +127,7 @@ def handle_request(user_text, tz_name=formatting.DEFAULT_TZ_NAME):
         follow_up = client.messages.create(
             model="claude-sonnet-5",
             max_tokens=300,
+            system=SYSTEM_PROMPT,
             tools=TOOLS,
             messages=messages,
         )

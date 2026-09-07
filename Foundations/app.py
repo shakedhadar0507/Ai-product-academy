@@ -5,10 +5,19 @@ import sys
 from datetime import date
 
 from dotenv import load_dotenv
-from flask import Flask, Response, flash, get_flashed_messages, redirect, request, url_for
+from flask import Flask, Response, flash, get_flashed_messages, jsonify, redirect, request, url_for
 from googleapiclient.discovery import build
 
-from agents import action_agent, brief_agent, calendar_agent, formatting, google_auth, running_agent, weather_agent
+from agents import (
+    action_agent,
+    brief_agent,
+    calendar_agent,
+    formatting,
+    google_auth,
+    running_agent,
+    voice_agent,
+    weather_agent,
+)
 
 load_dotenv()
 
@@ -110,7 +119,7 @@ def add_training_run(run_date, distance_km, duration_min, notes):
 
 def render_card(icon, title, body_html):
     return f"""
-    <section class="bg-white rounded-2xl shadow-md p-6 flex flex-col gap-4">
+    <section class="bg-white rounded-2xl shadow-md hover:shadow-lg transition-shadow duration-300 p-6 flex flex-col gap-4">
       <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
         <span class="text-2xl">{icon}</span> {title}
       </h2>
@@ -262,25 +271,45 @@ def dashboard():
         f"<div class='bg-emerald-50 border-l-4 border-emerald-400 rounded-r-lg p-3 text-sm text-emerald-900'>{action_messages[0]}</div>"
         if action_messages else ""
     )
+
+    voice_configured = voice_agent.is_configured()
+    if voice_configured:
+        mic_disabled_attr = ""
+        mic_title = "Record a voice request"
+        mic_extra_class = "bg-slate-100 hover:bg-indigo-100 text-slate-600 hover:text-indigo-600 cursor-pointer"
+    else:
+        mic_disabled_attr = "disabled"
+        mic_title = "Voice input not configured yet"
+        mic_extra_class = "bg-slate-50 text-slate-300 cursor-not-allowed"
+
     cards.insert(0, f"""
-    <section class="md:col-span-2 lg:col-span-3 bg-white rounded-2xl shadow-md p-6 flex flex-col gap-3">
-      <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
-        <span class="text-2xl">🤖</span> What should I do?
-      </h2>
+    <section class="md:col-span-2 lg:col-span-3 bg-white rounded-2xl shadow-md hover:shadow-lg transition-shadow duration-300 p-6 flex flex-col gap-4">
+      <div>
+        <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
+          <span class="text-2xl">🤖</span> What should I do?
+        </h2>
+        <p class="text-sm text-slate-400 mt-0.5">Type or speak a request — schedule events, draft emails, and more.</p>
+      </div>
       {action_result_html}
       <form method="POST" action="/agent-action" class="flex flex-col sm:flex-row gap-2">
-        <input type="text" name="user_text" required
+        <input type="text" name="user_text" id="agent-text-input" required
                placeholder="e.g. schedule a dentist appointment tomorrow 15:00-16:00"
-               class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
-        <button type="submit"
-                class="bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors">
-          Send
-        </button>
+               class="flex-1 border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-shadow">
+        <div class="flex gap-2">
+          <button type="button" id="mic-button" {mic_disabled_attr} title="{mic_title}"
+                  class="w-11 h-11 shrink-0 flex items-center justify-center rounded-full text-lg transition-all duration-200 active:scale-90 {mic_extra_class}">
+            🎤
+          </button>
+          <button type="submit"
+                  class="flex-1 sm:flex-none bg-indigo-500 hover:bg-indigo-600 active:scale-95 text-white rounded-lg px-5 py-2.5 text-sm font-medium transition-all duration-150 shadow-sm hover:shadow">
+            Send
+          </button>
+        </div>
       </form>
     </section>
     """)
     cards.insert(0, f"""
-    <section class="md:col-span-2 lg:col-span-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl shadow-lg p-8 flex flex-col gap-3">
+    <section class="md:col-span-2 lg:col-span-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl shadow-lg hover:shadow-xl transition-shadow duration-300 p-8 flex flex-col gap-3">
       <h2 class="flex items-center gap-2 text-xl font-bold">
         <span class="text-3xl">🧭</span> Daily Brief
       </h2>
@@ -322,6 +351,9 @@ def dashboard():
     """
     cards.append(render_card("🏃", "Training Log", body))
 
+    now_local = formatting.now_in_tz(tz_name)
+    header_subtitle = f"{now_local.strftime('%A, %B')} {now_local.day}, {now_local.year}"
+
     return f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -352,6 +384,7 @@ def dashboard():
       <header class="bg-white shadow-sm">
         <div class="max-w-6xl mx-auto px-6 py-5">
           <h1 class="text-2xl font-bold text-slate-800">📊 Personal Dashboard</h1>
+          <p class="text-sm text-slate-400 mt-0.5">{header_subtitle}</p>
         </div>
       </header>
       <main class="max-w-6xl mx-auto px-6 py-8">
@@ -359,6 +392,62 @@ def dashboard():
           {"".join(cards)}
         </div>
       </main>
+      <script>
+        (function() {{
+          var micButton = document.getElementById('mic-button');
+          var textInput = document.getElementById('agent-text-input');
+          if (!micButton || micButton.disabled || !textInput) return;
+
+          var mediaRecorder = null;
+          var chunks = [];
+          var recording = false;
+          var idleClasses = ['bg-slate-100', 'hover:bg-indigo-100', 'text-slate-600', 'hover:text-indigo-600'];
+          var recordingClasses = ['bg-rose-500', 'text-white', 'animate-pulse'];
+
+          function setRecordingStyle(isRecording) {{
+            idleClasses.forEach(function(c) {{ micButton.classList.toggle(c, !isRecording); }});
+            recordingClasses.forEach(function(c) {{ micButton.classList.toggle(c, isRecording); }});
+          }}
+
+          micButton.addEventListener('click', function() {{
+            if (!recording) {{
+              navigator.mediaDevices.getUserMedia({{ audio: true }}).then(function(stream) {{
+                mediaRecorder = new MediaRecorder(stream);
+                chunks = [];
+                mediaRecorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
+                mediaRecorder.onstop = function() {{
+                  stream.getTracks().forEach(function(t) {{ t.stop(); }});
+                  setRecordingStyle(false);
+                  micButton.textContent = '⏳';
+                  micButton.disabled = true;
+                  var blob = new Blob(chunks, {{ type: 'audio/webm' }});
+                  var formData = new FormData();
+                  formData.append('audio', blob, 'recording.webm');
+                  fetch('/transcribe', {{ method: 'POST', body: formData }})
+                    .then(function(r) {{ return r.json(); }})
+                    .then(function(data) {{
+                      if (data.text) {{ textInput.value = data.text; textInput.focus(); }}
+                    }})
+                    .catch(function() {{}})
+                    .finally(function() {{
+                      micButton.textContent = '🎤';
+                      micButton.disabled = false;
+                    }});
+                }};
+                mediaRecorder.start();
+                recording = true;
+                micButton.textContent = '⏹️';
+                setRecordingStyle(true);
+              }}).catch(function() {{
+                micButton.title = 'Microphone access denied';
+              }});
+            }} else {{
+              mediaRecorder.stop();
+              recording = false;
+            }}
+          }});
+        }})();
+      </script>
     </body>
     </html>
     """
@@ -390,6 +479,21 @@ def agent_action():
 
     flash(result)
     return redirect(url_for("dashboard"))
+
+
+@app.route("/transcribe", methods=["POST"])
+def transcribe():
+    if not voice_agent.is_configured():
+        return jsonify({"error": "Voice input not configured"}), 503
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio provided"}), 400
+
+    try:
+        text = voice_agent.transcribe(request.files["audio"])
+        return jsonify({"text": text})
+    except Exception as e:
+        print(f"[ERROR] transcribe: {e}", file=sys.stderr)
+        return jsonify({"error": "Could not transcribe audio"}), 500
 
 
 if __name__ == "__main__":

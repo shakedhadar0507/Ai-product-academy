@@ -35,7 +35,48 @@ def get_data(tz_name=formatting.DEFAULT_TZ_NAME):
     return events_result.get("items", [])
 
 
-def create_event(summary, date, start_time, end_time, description="", tz_name=formatting.DEFAULT_TZ_NAME):
+COLOR_NAME_TO_ID = {
+    "lavender": "1",
+    "sage": "2",
+    "grape": "3",
+    "purple": "3",
+    "flamingo": "4",
+    "pink": "4",
+    "banana": "5",
+    "yellow": "5",
+    "tangerine": "6",
+    "orange": "6",
+    "peacock": "7",
+    "blue": "7",
+    "graphite": "8",
+    "gray": "8",
+    "grey": "8",
+    "blueberry": "9",
+    "basil": "10",
+    "green": "10",
+    "tomato": "11",
+    "red": "11",
+}
+
+
+def resolve_color_id(color_name):
+    """Map a plain color name to a Google Calendar colorId, or None if unrecognized."""
+    if not color_name:
+        return None
+    return COLOR_NAME_TO_ID.get(color_name.strip().lower())
+
+
+def create_event(
+    summary,
+    date,
+    start_time,
+    end_time,
+    description="",
+    color=None,
+    recurrence=None,
+    attendees=None,
+    tz_name=formatting.DEFAULT_TZ_NAME,
+):
     creds = google_auth.get_credentials(google_auth.SCOPES)
     service = build("calendar", "v3", credentials=creds)
 
@@ -50,6 +91,14 @@ def create_event(summary, date, start_time, end_time, description="", tz_name=fo
         "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
     }
 
+    color_id = resolve_color_id(color)
+    if color_id:
+        event_body["colorId"] = color_id
+    if recurrence:
+        event_body["recurrence"] = [recurrence]
+    if attendees:
+        event_body["attendees"] = [{"email": email} for email in attendees]
+
     created = service.events().insert(calendarId="primary", body=event_body).execute()
     return {
         "id": created.get("id"),
@@ -57,6 +106,9 @@ def create_event(summary, date, start_time, end_time, description="", tz_name=fo
         "htmlLink": created.get("htmlLink"),
         "start": created.get("start", {}).get("dateTime"),
         "end": created.get("end", {}).get("dateTime"),
+        "colorId": created.get("colorId"),
+        "recurrence": created.get("recurrence"),
+        "attendees": [a.get("email") for a in created.get("attendees", [])] or None,
     }
 
 
