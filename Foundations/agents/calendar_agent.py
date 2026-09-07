@@ -1,3 +1,4 @@
+import datetime
 import sys
 import time
 
@@ -31,6 +32,34 @@ def get_data():
     ).execute()
 
     return events_result.get("items", [])
+
+
+def create_event(summary, date, start_time, end_time, description=""):
+    creds = google_auth.get_credentials(google_auth.SCOPES)
+    service = build("calendar", "v3", credentials=creds)
+
+    start_dt = datetime.datetime.strptime(
+        f"{date} {start_time}", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=formatting.ISRAEL_TZ)
+    end_dt = datetime.datetime.strptime(
+        f"{date} {end_time}", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=formatting.ISRAEL_TZ)
+
+    event_body = {
+        "summary": summary,
+        "description": description,
+        "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Jerusalem"},
+        "end": {"dateTime": end_dt.isoformat(), "timeZone": "Asia/Jerusalem"},
+    }
+
+    created = service.events().insert(calendarId="primary", body=event_body).execute()
+    return {
+        "id": created.get("id"),
+        "summary": created.get("summary"),
+        "htmlLink": created.get("htmlLink"),
+        "start": created.get("start", {}).get("dateTime"),
+        "end": created.get("end", {}).get("dateTime"),
+    }
 
 
 def get_insight(data):

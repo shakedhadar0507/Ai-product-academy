@@ -5,14 +5,15 @@ import sys
 from datetime import date
 
 from dotenv import load_dotenv
-from flask import Flask, Response, redirect, request, url_for
+from flask import Flask, Response, flash, get_flashed_messages, redirect, request, url_for
 from googleapiclient.discovery import build
 
-from agents import brief_agent, calendar_agent, formatting, google_auth, running_agent, weather_agent
+from agents import action_agent, brief_agent, calendar_agent, formatting, google_auth, running_agent, weather_agent
 
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)
 
 
 @app.before_request
@@ -253,6 +254,35 @@ def dashboard():
     except Exception as e:
         print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
         brief_body = "<p class='text-lg text-indigo-100 italic'>Could not generate daily brief</p>"
+    action_messages = get_flashed_messages()
+    action_result_html = (
+        f"<div class='bg-emerald-50 border-l-4 border-emerald-400 rounded-r-lg p-3 text-sm text-emerald-900'>{action_messages[0]}</div>"
+        if action_messages else ""
+    )
+    cards.insert(0, f"""
+    <section class="md:col-span-2 lg:col-span-3 bg-white rounded-2xl shadow-md p-6 flex flex-col gap-3">
+      <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
+        <span class="text-2xl">🤖</span> What should I do?
+      </h2>
+      {action_result_html}
+      <form method="POST" action="/agent-action" class="flex flex-col sm:flex-row gap-2">
+        <input type="text" name="user_text" required
+               placeholder="e.g. schedule a dentist appointment tomorrow 15:00-16:00"
+               class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <button type="submit"
+                class="bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors">
+          Send
+        </button>
+      </form>
+    </section>
+    """)
+
+    try:
+        brief = brief_agent.get_insight(calendar_result, weather_result, email_result, training_result)
+        brief_body = f"<p class='text-lg leading-relaxed'>{brief}</p>"
+    except Exception as e:
+        print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
+        brief_body = "<p class='text-lg text-indigo-100 italic'>Could not generate daily brief</p>"
     cards.insert(0, f"""
     <section class="md:col-span-2 lg:col-span-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl shadow-lg p-8 flex flex-col gap-3">
       <h2 class="flex items-center gap-2 text-xl font-bold">
@@ -328,6 +358,23 @@ def add_run():
     duration_min = int(request.form["duration_min"])
     notes = request.form.get("notes", "")
     add_training_run(run_date, distance_km, duration_min, notes)
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/agent-action", methods=["POST"])
+def agent_action():
+    user_text = request.form.get("user_text", "").strip()
+    if not user_text:
+        flash("Please enter a request.")
+        return redirect(url_for("dashboard"))
+
+    try:
+        result = action_agent.handle_request(user_text)
+    except Exception as e:
+        print(f"[ERROR] agent_action: {e}", file=sys.stderr)
+        result = "משהו השתבש בביצוע הפעולה."
+
+    flash(result)
     return redirect(url_for("dashboard"))
 
 
