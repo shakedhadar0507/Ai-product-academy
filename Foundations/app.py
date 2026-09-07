@@ -145,7 +145,7 @@ def render_email_bucket(name, count, subjects):
 @app.route("/")
 def dashboard():
     cards = []
-    tz_name = request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME)
+    tz_name = formatting.resolve_tz_name(request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME))
 
     weather_result = None
     try:
@@ -372,7 +372,7 @@ def add_run():
 
 @app.route("/agent-action", methods=["POST"])
 def agent_action():
-    tz_name = request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME)
+    tz_name = formatting.resolve_tz_name(request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME))
     user_text = request.form.get("user_text", "").strip()
     if not user_text:
         flash("Please enter a request.")

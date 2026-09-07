@@ -5,6 +5,15 @@ DEFAULT_TZ_NAME = "Asia/Jerusalem"
 ISRAEL_TZ = ZoneInfo(DEFAULT_TZ_NAME)
 
 
+def resolve_tz_name(tz_name):
+    """Return tz_name if it's a valid IANA zone, otherwise fall back to the default timezone."""
+    try:
+        ZoneInfo(tz_name)
+        return tz_name
+    except Exception:
+        return DEFAULT_TZ_NAME
+
+
 def now_in_tz(tz_name=DEFAULT_TZ_NAME):
     """Return the current datetime in the given IANA timezone, regardless of the server's own timezone."""
     return datetime.now(ZoneInfo(tz_name))
