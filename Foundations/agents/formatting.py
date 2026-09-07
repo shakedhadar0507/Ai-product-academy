@@ -1,4 +1,17 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+
+
+def now_in_israel():
+    """Return the current datetime in Asia/Jerusalem, regardless of the server's own timezone."""
+    return datetime.now(ISRAEL_TZ)
+
+
+def today_in_israel():
+    """Return today's date in Asia/Jerusalem, regardless of the server's own timezone."""
+    return now_in_israel().date()
 
 
 def format_date(value):

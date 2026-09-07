@@ -1,4 +1,3 @@
-import datetime
 import sys
 import time
 
@@ -6,7 +5,7 @@ import anthropic
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 
-from agents import google_auth
+from agents import formatting, google_auth
 
 load_dotenv()
 
@@ -19,7 +18,7 @@ def get_data():
     creds = google_auth.get_credentials(google_auth.SCOPES)
     service = build("calendar", "v3", credentials=creds)
 
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = formatting.now_in_israel()
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
 
@@ -35,7 +34,7 @@ def get_data():
 
 
 def get_insight(data):
-    today = datetime.date.today().isoformat()
+    today = formatting.today_in_israel().isoformat()
     cached = _insight_cache.get(today)
     if cached and time.time() - cached[0] < CACHE_TTL_SECONDS:
         return cached[1]

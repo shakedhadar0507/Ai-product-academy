@@ -134,7 +134,7 @@ def dashboard():
         body = render_error("Could not fetch weather")
     cards.append(render_card("☀️", "Weather in Tel Aviv", body))
 
-    days_remaining = (MARATHON_DATE - date.today()).days
+    days_remaining = (MARATHON_DATE - formatting.today_in_israel()).days
     if days_remaining > 0:
         countdown_html = (
             f"<span class='text-3xl font-bold text-indigo-600'>{days_remaining}</span> "
