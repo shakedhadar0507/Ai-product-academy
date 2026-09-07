@@ -61,30 +61,30 @@ def handle_request(user_text, tz_name=formatting.DEFAULT_TZ_NAME):
             messages=messages,
         )
 
-        tool_use_block = next((block for block in response.content if block.type == "tool_use"), None)
-        if not tool_use_block:
+        tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
+        if not tool_use_blocks:
             text_block = next((block for block in response.content if block.type == "text"), None)
             return text_block.text if text_block else "לא הצלחתי להבין איזו פעולה לבצע."
 
-        try:
-            result = tool_functions[tool_use_block.name](**tool_use_block.input)
-            tool_result_content = f"Success: {result}"
-            is_error = False
-        except Exception as e:
-            print(f"[ERROR] action_agent tool execution ({tool_use_block.name}): {e}", file=sys.stderr)
-            tool_result_content = f"Error: {e}"
-            is_error = True
-
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({
-            "role": "user",
-            "content": [{
+        tool_results = []
+        for tool_use_block in tool_use_blocks:
+            try:
+                result = tool_functions[tool_use_block.name](**tool_use_block.input)
+                tool_result_content = f"Success: {result}"
+                is_error = False
+            except Exception as e:
+                print(f"[ERROR] action_agent tool execution ({tool_use_block.name}): {e}", file=sys.stderr)
+                tool_result_content = f"Error: {e}"
+                is_error = True
+            tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tool_use_block.id,
                 "content": tool_result_content,
                 "is_error": is_error,
-            }],
-        })
+            })
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
 
         follow_up = client.messages.create(
             model="claude-sonnet-5",
@@ -93,7 +93,8 @@ def handle_request(user_text, tz_name=formatting.DEFAULT_TZ_NAME):
             messages=messages,
         )
         final_text = next((block.text for block in follow_up.content if block.type == "text"), None)
-        return final_text or tool_result_content
+        fallback_summary = "; ".join(result["content"] for result in tool_results)
+        return final_text or fallback_summary
     except Exception as e:
         print(f"[ERROR] action_agent: {e}", file=sys.stderr)
         return "משהו השתבש בביצוע הפעולה."

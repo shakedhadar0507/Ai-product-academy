@@ -302,10 +302,10 @@ def dashboard():
         insight_html = render_error("Could not generate running insight")
     body += insight_html
 
-    body += """
+    body += f"""
     <form method="POST" action="/add-run" class="mt-4 border-t border-slate-100 pt-4 flex flex-col gap-2">
       <div class="grid grid-cols-2 gap-2">
-        <input type="date" name="date" required
+        <input type="date" name="date" required value="{formatting.today_in_tz(tz_name).isoformat()}"
                class="col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
         <input type="number" step="0.01" min="0" name="distance_km" placeholder="Distance (km)" required
                class="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
