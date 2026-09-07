@@ -36,6 +36,7 @@ LATITUDE = 32.08
 LONGITUDE = 34.78
 DB_FILE = "training_log.db"
 MARATHON_DATE = date(2026, 11, 1)
+USER_TZ_COOKIE = "user_tz"
 
 
 def get_header(headers, name):
@@ -144,6 +145,7 @@ def render_email_bucket(name, count, subjects):
 @app.route("/")
 def dashboard():
     cards = []
+    tz_name = request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME)
 
     weather_result = None
     try:
@@ -157,7 +159,7 @@ def dashboard():
         body = render_error("Could not fetch weather")
     cards.append(render_card("☀️", "Weather in Tel Aviv", body))
 
-    days_remaining = (MARATHON_DATE - formatting.today_in_israel()).days
+    days_remaining = (MARATHON_DATE - formatting.today_in_tz(tz_name)).days
     if days_remaining > 0:
         countdown_html = (
             f"<span class='text-3xl font-bold text-indigo-600'>{days_remaining}</span> "
@@ -175,9 +177,9 @@ def dashboard():
 
     calendar_result = None
     try:
-        events = calendar_agent.get_data()
+        events = calendar_agent.get_data(tz_name)
         calendar_result = events
-        insight = calendar_agent.get_insight(events)
+        insight = calendar_agent.get_insight(events, tz_name)
         if not events:
             events_html = "<p class='text-slate-400'>No events found for today.</p>"
         else:
@@ -249,11 +251,12 @@ def dashboard():
         body = render_error("Could not fetch training log")
 
     try:
-        brief = brief_agent.get_insight(calendar_result, weather_result, email_result, training_result)
+        brief = brief_agent.get_insight(calendar_result, weather_result, email_result, training_result, tz_name)
         brief_body = f"<p class='text-lg leading-relaxed'>{brief}</p>"
     except Exception as e:
         print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
         brief_body = "<p class='text-lg text-indigo-100 italic'>Could not generate daily brief</p>"
+
     action_messages = get_flashed_messages()
     action_result_html = (
         f"<div class='bg-emerald-50 border-l-4 border-emerald-400 rounded-r-lg p-3 text-sm text-emerald-900'>{action_messages[0]}</div>"
@@ -276,13 +279,6 @@ def dashboard():
       </form>
     </section>
     """)
-
-    try:
-        brief = brief_agent.get_insight(calendar_result, weather_result, email_result, training_result)
-        brief_body = f"<p class='text-lg leading-relaxed'>{brief}</p>"
-    except Exception as e:
-        print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
-        brief_body = "<p class='text-lg text-indigo-100 italic'>Could not generate daily brief</p>"
     cards.insert(0, f"""
     <section class="md:col-span-2 lg:col-span-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl shadow-lg p-8 flex flex-col gap-3">
       <h2 class="flex items-center gap-2 text-xl font-bold">
@@ -333,6 +329,19 @@ def dashboard():
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>Personal Dashboard</title>
+      <script>
+        (function() {{
+          try {{
+            var detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            var match = document.cookie.match(/(?:^|;\\s*)user_tz=([^;]*)/);
+            var current = match ? decodeURIComponent(match[1]) : null;
+            if (detected && detected !== current) {{
+              document.cookie = "user_tz=" + encodeURIComponent(detected) + ";path=/;max-age=31536000;SameSite=Lax";
+              location.reload();
+            }}
+          }} catch (e) {{}}
+        }})();
+      </script>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-100 min-h-screen">
@@ -363,13 +372,14 @@ def add_run():
 
 @app.route("/agent-action", methods=["POST"])
 def agent_action():
+    tz_name = request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME)
     user_text = request.form.get("user_text", "").strip()
     if not user_text:
         flash("Please enter a request.")
         return redirect(url_for("dashboard"))
 
     try:
-        result = action_agent.handle_request(user_text)
+        result = action_agent.handle_request(user_text, tz_name)
     except Exception as e:
         print(f"[ERROR] agent_action: {e}", file=sys.stderr)
         result = "משהו השתבש בביצוע הפעולה."

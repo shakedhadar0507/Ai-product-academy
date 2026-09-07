@@ -3,7 +3,7 @@ import sys
 import anthropic
 from dotenv import load_dotenv
 
-from agents import calendar_agent, gmail_agent
+from agents import calendar_agent, formatting, gmail_agent
 
 load_dotenv()
 
@@ -38,16 +38,21 @@ TOOLS = [
     },
 ]
 
-TOOL_FUNCTIONS = {
-    "create_calendar_event": lambda **kwargs: calendar_agent.create_event(**kwargs),
-    "create_gmail_draft": lambda **kwargs: gmail_agent.create_draft(**kwargs),
-}
+
+def _build_tool_functions(tz_name):
+    return {
+        "create_calendar_event": lambda **kwargs: calendar_agent.create_event(tz_name=tz_name, **kwargs),
+        "create_gmail_draft": lambda **kwargs: gmail_agent.create_draft(**kwargs),
+    }
 
 
-def handle_request(user_text):
+def handle_request(user_text, tz_name=formatting.DEFAULT_TZ_NAME):
+    tool_functions = _build_tool_functions(tz_name)
     try:
         client = anthropic.Anthropic()
-        messages = [{"role": "user", "content": user_text}]
+        today_str = formatting.now_in_tz(tz_name).strftime("%Y-%m-%d (%A)")
+        prompt = f"Today's date is {today_str}, in the {tz_name} timezone.\n\n{user_text}"
+        messages = [{"role": "user", "content": prompt}]
 
         response = client.messages.create(
             model="claude-sonnet-5",
@@ -62,7 +67,7 @@ def handle_request(user_text):
             return text_block.text if text_block else "לא הצלחתי להבין איזו פעולה לבצע."
 
         try:
-            result = TOOL_FUNCTIONS[tool_use_block.name](**tool_use_block.input)
+            result = tool_functions[tool_use_block.name](**tool_use_block.input)
             tool_result_content = f"Success: {result}"
             is_error = False
         except Exception as e:

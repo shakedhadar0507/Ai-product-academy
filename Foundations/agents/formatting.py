@@ -1,17 +1,28 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+DEFAULT_TZ_NAME = "Asia/Jerusalem"
+ISRAEL_TZ = ZoneInfo(DEFAULT_TZ_NAME)
+
+
+def now_in_tz(tz_name=DEFAULT_TZ_NAME):
+    """Return the current datetime in the given IANA timezone, regardless of the server's own timezone."""
+    return datetime.now(ZoneInfo(tz_name))
+
+
+def today_in_tz(tz_name=DEFAULT_TZ_NAME):
+    """Return today's date in the given IANA timezone, regardless of the server's own timezone."""
+    return now_in_tz(tz_name).date()
 
 
 def now_in_israel():
-    """Return the current datetime in Asia/Jerusalem, regardless of the server's own timezone."""
-    return datetime.now(ISRAEL_TZ)
+    """Backward-compatible wrapper: now_in_tz() defaulted to Asia/Jerusalem."""
+    return now_in_tz(DEFAULT_TZ_NAME)
 
 
 def today_in_israel():
-    """Return today's date in Asia/Jerusalem, regardless of the server's own timezone."""
-    return now_in_israel().date()
+    """Backward-compatible wrapper: today_in_tz() defaulted to Asia/Jerusalem."""
+    return today_in_tz(DEFAULT_TZ_NAME)
 
 
 def format_date(value):

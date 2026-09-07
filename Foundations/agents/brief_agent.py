@@ -52,9 +52,9 @@ def _summarize_training(training_summary):
     )
 
 
-def get_insight(calendar_data, weather_data, email_summary, training_summary):
-    today = formatting.today_in_israel().isoformat()
-    cached = _insight_cache.get(today)
+def get_insight(calendar_data, weather_data, email_summary, training_summary, tz_name=formatting.DEFAULT_TZ_NAME):
+    cache_key = (tz_name, formatting.today_in_tz(tz_name).isoformat())
+    cached = _insight_cache.get(cache_key)
     if cached and time.time() - cached[0] < CACHE_TTL_SECONDS:
         return cached[1]
 
@@ -86,5 +86,5 @@ def get_insight(calendar_data, weather_data, email_summary, training_summary):
         print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
         insight = "Could not generate daily brief"
 
-    _insight_cache[today] = (time.time(), insight)
+    _insight_cache[cache_key] = (time.time(), insight)
     return insight

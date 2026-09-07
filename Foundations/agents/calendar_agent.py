@@ -1,6 +1,7 @@
 import datetime
 import sys
 import time
+from zoneinfo import ZoneInfo
 
 import anthropic
 from dotenv import load_dotenv
@@ -15,11 +16,11 @@ CACHE_TTL_SECONDS = 600
 _insight_cache = {}
 
 
-def get_data():
+def get_data(tz_name=formatting.DEFAULT_TZ_NAME):
     creds = google_auth.get_credentials(google_auth.SCOPES)
     service = build("calendar", "v3", credentials=creds)
 
-    now = formatting.now_in_israel()
+    now = formatting.now_in_tz(tz_name)
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
 
@@ -34,22 +35,19 @@ def get_data():
     return events_result.get("items", [])
 
 
-def create_event(summary, date, start_time, end_time, description=""):
+def create_event(summary, date, start_time, end_time, description="", tz_name=formatting.DEFAULT_TZ_NAME):
     creds = google_auth.get_credentials(google_auth.SCOPES)
     service = build("calendar", "v3", credentials=creds)
 
-    start_dt = datetime.datetime.strptime(
-        f"{date} {start_time}", "%Y-%m-%d %H:%M"
-    ).replace(tzinfo=formatting.ISRAEL_TZ)
-    end_dt = datetime.datetime.strptime(
-        f"{date} {end_time}", "%Y-%m-%d %H:%M"
-    ).replace(tzinfo=formatting.ISRAEL_TZ)
+    tz = ZoneInfo(tz_name)
+    start_dt = datetime.datetime.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    end_dt = datetime.datetime.strptime(f"{date} {end_time}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
 
     event_body = {
         "summary": summary,
         "description": description,
-        "start": {"dateTime": start_dt.isoformat(), "timeZone": "Asia/Jerusalem"},
-        "end": {"dateTime": end_dt.isoformat(), "timeZone": "Asia/Jerusalem"},
+        "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
+        "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
     }
 
     created = service.events().insert(calendarId="primary", body=event_body).execute()
@@ -62,9 +60,9 @@ def create_event(summary, date, start_time, end_time, description=""):
     }
 
 
-def get_insight(data):
-    today = formatting.today_in_israel().isoformat()
-    cached = _insight_cache.get(today)
+def get_insight(data, tz_name=formatting.DEFAULT_TZ_NAME):
+    cache_key = (tz_name, formatting.today_in_tz(tz_name).isoformat())
+    cached = _insight_cache.get(cache_key)
     if cached and time.time() - cached[0] < CACHE_TTL_SECONDS:
         return cached[1]
 
@@ -103,5 +101,5 @@ def get_insight(data):
         print(f"[ERROR] calendar_insight: {e}", file=sys.stderr)
         insight = "Could not generate insight"
 
-    _insight_cache[today] = (time.time(), insight)
+    _insight_cache[cache_key] = (time.time(), insight)
     return insight
