@@ -1,14 +1,35 @@
 import os
+import secrets
 import sqlite3
 import sys
 from datetime import date
 
-from flask import Flask, redirect, request, url_for
+from dotenv import load_dotenv
+from flask import Flask, Response, redirect, request, url_for
 from googleapiclient.discovery import build
 
 from agents import calendar_agent, formatting, google_auth, running_agent, weather_agent
 
+load_dotenv()
+
 app = Flask(__name__)
+
+
+@app.before_request
+def require_basic_auth():
+    username = os.environ.get("DASHBOARD_USERNAME")
+    password = os.environ.get("DASHBOARD_PASSWORD")
+    auth = request.authorization
+    if (
+        not username
+        or not password
+        or not auth
+        or not secrets.compare_digest(auth.username or "", username)
+        or not secrets.compare_digest(auth.password or "", password)
+    ):
+        return Response(
+            "Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Personal Dashboard"'}
+        )
 
 LATITUDE = 32.08
 LONGITUDE = 34.78
