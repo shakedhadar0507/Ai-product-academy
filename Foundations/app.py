@@ -2,10 +2,21 @@ import os
 import secrets
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 from dotenv import load_dotenv
-from flask import Flask, Response, flash, get_flashed_messages, jsonify, redirect, request, url_for
+from flask import (
+    Flask,
+    Response,
+    flash,
+    get_flashed_messages,
+    jsonify,
+    redirect,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
 from googleapiclient.discovery import build
 
 from agents import (
@@ -22,24 +33,116 @@ from agents import (
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(32)
+# A stable SECRET_KEY keeps the login cookie valid across restarts; without it
+# every restart (or every Gunicorn worker) signs cookies with a different key.
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.config.update(
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
+)
+
+# The home-screen app can't send a Basic Auth header, so login is a form that
+# sets a 30-day session cookie. The PWA files must load before login.
+PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js"}
+
+
+def credentials_valid(given_username, given_password):
+    username = os.environ.get("DASHBOARD_USERNAME")
+    password = os.environ.get("DASHBOARD_PASSWORD")
+    return bool(
+        username
+        and password
+        and secrets.compare_digest(given_username or "", username)
+        and secrets.compare_digest(given_password or "", password)
+    )
 
 
 @app.before_request
-def require_basic_auth():
-    username = os.environ.get("DASHBOARD_USERNAME")
-    password = os.environ.get("DASHBOARD_PASSWORD")
+def require_login():
+    if request.path in PUBLIC_PATHS or request.path.startswith("/static/"):
+        return None
+    if session.get("authenticated"):
+        return None
     auth = request.authorization
-    if (
-        not username
-        or not password
-        or not auth
-        or not secrets.compare_digest(auth.username or "", username)
-        or not secrets.compare_digest(auth.password or "", password)
-    ):
-        return Response(
-            "Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Personal Dashboard"'}
-        )
+    if auth and credentials_valid(auth.username, auth.password):
+        return None
+    if request.method == "GET":
+        return redirect(url_for("login"))
+    return Response("Authentication required", 401)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error_html = ""
+    if request.method == "POST":
+        if credentials_valid(request.form.get("username"), request.form.get("password")):
+            session.clear()
+            session.permanent = True
+            session["authenticated"] = True
+            return redirect(url_for("dashboard"))
+        error_html = "<p class='text-sm text-rose-500'>Wrong username or password.</p>"
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Sign in · Shaked Hub</title>
+      {PWA_HEAD_TAGS}
+      <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-slate-100 min-h-screen flex items-center justify-center p-4">
+      <form method="POST" class="bg-white rounded-2xl shadow-md p-8 w-full max-w-sm flex flex-col gap-3">
+        <h1 class="text-xl font-bold text-slate-800">📊 Shaked Hub</h1>
+        {error_html}
+        <input name="username" autocomplete="username" placeholder="Username" required
+               class="border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <input name="password" type="password" autocomplete="current-password" placeholder="Password" required
+               class="border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <button type="submit"
+                class="bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2.5 text-sm font-medium transition-colors">
+          Sign in
+        </button>
+      </form>
+    </body>
+    </html>
+    """
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    return send_from_directory(app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json")
+
+
+@app.route("/sw.js")
+def service_worker():
+    # Served from the root so the worker's scope covers the whole app.
+    response = send_from_directory(app.static_folder, "sw.js", mimetype="application/javascript")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+PWA_HEAD_TAGS = """
+      <link rel="manifest" href="/manifest.webmanifest">
+      <meta name="theme-color" content="#4f46e5">
+      <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+      <meta name="apple-mobile-web-app-capable" content="yes">
+      <meta name="mobile-web-app-capable" content="yes">
+      <meta name="apple-mobile-web-app-title" content="Shaked Hub">
+      <meta name="apple-mobile-web-app-status-bar-style" content="default">
+      <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() { navigator.serviceWorker.register('/sw.js'); });
+        }
+      </script>
+"""
 
 LATITUDE = 32.08
 LONGITUDE = 34.78
@@ -361,6 +464,7 @@ def dashboard():
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>Personal Dashboard</title>
+      {PWA_HEAD_TAGS}
       <script>
         (function() {{
           try {{
@@ -382,9 +486,12 @@ def dashboard():
     </head>
     <body class="bg-slate-100 min-h-screen">
       <header class="bg-white shadow-sm">
-        <div class="max-w-6xl mx-auto px-6 py-5">
-          <h1 class="text-2xl font-bold text-slate-800">📊 Personal Dashboard</h1>
-          <p class="text-sm text-slate-400 mt-0.5">{header_subtitle}</p>
+        <div class="max-w-6xl mx-auto px-6 py-5 flex items-start justify-between gap-4">
+          <div>
+            <h1 class="text-2xl font-bold text-slate-800">📊 Personal Dashboard</h1>
+            <p class="text-sm text-slate-400 mt-0.5">{header_subtitle}</p>
+          </div>
+          <a href="/logout" class="text-sm text-slate-400 hover:text-slate-600">Sign out</a>
         </div>
       </header>
       <main class="max-w-6xl mx-auto px-6 py-8">
