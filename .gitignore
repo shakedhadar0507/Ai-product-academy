@@ -4,3 +4,6 @@ training_log.db
 __pycache__/
 *.pyc
 .env
+
+# Garmin data and tokens stay on the PC
+garmin-pipeline/
