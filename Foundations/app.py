@@ -1,6 +1,5 @@
 import os
 import secrets
-import sqlite3
 import sys
 from datetime import date, timedelta
 
@@ -24,6 +23,7 @@ from agents import (
     brief_agent,
     calendar_agent,
     formatting,
+    garmin_agent,
     google_auth,
     running_agent,
     voice_agent,
@@ -146,7 +146,6 @@ PWA_HEAD_TAGS = """
 
 LATITUDE = 32.08
 LONGITUDE = 34.78
-DB_FILE = "training_log.db"
 MARATHON_DATE = date(2026, 11, 1)
 USER_TZ_COOKIE = "user_tz"
 
@@ -189,35 +188,6 @@ def get_email_bucket(service, query, sample_size=3):
         subjects.append(get_header(message["payload"]["headers"], "Subject"))
 
     return len(message_ids), subjects
-
-
-RUNS_TABLE_SCHEMA = """
-    CREATE TABLE IF NOT EXISTS runs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT NOT NULL,
-        distance_km REAL NOT NULL,
-        duration_min INTEGER NOT NULL,
-        notes TEXT
-    )
-"""
-
-
-def get_training_log():
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(RUNS_TABLE_SCHEMA)
-        rows = conn.execute(
-            "SELECT date, distance_km, duration_min, notes FROM runs ORDER BY date"
-        ).fetchall()
-    return rows
-
-
-def add_training_run(run_date, distance_km, duration_min, notes):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(RUNS_TABLE_SCHEMA)
-        conn.execute(
-            "INSERT INTO runs (date, distance_km, duration_min, notes) VALUES (?, ?, ?, ?)",
-            (run_date, distance_km, duration_min, notes),
-        )
 
 
 def render_card(icon, title, body_html):
@@ -339,28 +309,13 @@ def dashboard():
     cards.append(render_card("📧", "Inbox Overview", body))
 
     training_result = None
-    try:
-        rows = get_training_log()
-        training_result = rows
-        if not rows:
-            body = "<p class='text-slate-400'>No runs logged yet.</p>"
-        else:
-            items = []
-            total_distance = 0
-            for run_date, distance_km, duration_min, notes in rows:
-                items.append(
-                    f"<span class='text-slate-400'>{formatting.format_date(run_date)}</span> &mdash; "
-                    f"<span class='font-medium text-slate-800'>{distance_km} km</span> "
-                    f"in {duration_min} min &middot; {notes}"
-                )
-                total_distance += distance_km
-            body = render_list(items) + (
-                f"<p class='mt-3 text-sm font-semibold text-slate-700'>"
-                f"Total distance: {total_distance} km</p>"
-            )
-    except Exception as e:
-        print(f"[ERROR] training_log: {e}", file=sys.stderr)
-        body = render_error("Could not fetch training log")
+    garmin_data = None
+    if garmin_agent.is_configured():
+        try:
+            garmin_data = garmin_agent.get_data(formatting.today_in_tz(tz_name))
+            training_result = garmin_agent.as_training_log(garmin_data["runs"])
+        except Exception as e:
+            print(f"[ERROR] garmin: {e}", file=sys.stderr)
 
     try:
         brief = brief_agent.get_insight(calendar_result, weather_result, email_result, training_result, tz_name)
@@ -420,6 +375,46 @@ def dashboard():
     </section>
     """)
 
+    today_local = formatting.today_in_tz(tz_name)
+    planned = garmin_agent.get_planned_workout(today_local)
+    plan_html = (
+        f"<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-1'>Today's plan</p>"
+        f"<p dir='rtl' class='text-slate-800 font-medium'>{planned or 'אין אימון מתוכנן'}</p>"
+    )
+    if garmin_data is None:
+        garmin_html = render_error(
+            "Garmin data not connected yet" if not garmin_agent.is_configured() else "Could not fetch Garmin data"
+        )
+    else:
+        wellness = garmin_data["wellness"] or {}
+        stats = [
+            ("Readiness", garmin_agent.format_number(wellness.get("training_readiness"))),
+            ("HRV", f"{wellness['hrv_last_night_ms']:.0f} ms" if wellness.get("hrv_last_night_ms") else None),
+            ("Sleep", garmin_agent.format_hours(wellness.get("sleep_s")) if wellness.get("sleep_s") else None),
+            ("Sleep score", garmin_agent.format_number(wellness.get("sleep_score"))),
+            ("Resting HR", garmin_agent.format_number(wellness.get("resting_hr"))),
+            ("Body Battery", garmin_agent.format_number(wellness.get("body_battery_high"))),
+        ]
+        stats_html = "".join(
+            f"<div class='bg-slate-50 rounded-lg p-2'><p class='text-xs text-slate-400'>{label}</p>"
+            f"<p class='font-semibold text-slate-800'>{value if value is not None else '–'}</p></div>"
+            for label, value in stats
+        )
+        hrv_status = wellness.get("hrv_status")
+        wellness_date = wellness.get("date")
+        caption = " &middot; ".join(
+            part for part in [
+                f"Night of {formatting.format_date(wellness_date)}" if wellness_date else None,
+                f"HRV status: {hrv_status.lower()}" if hrv_status else None,
+                garmin_agent.format_status(wellness.get("training_status")),
+            ] if part
+        )
+        garmin_html = (
+            f"<div class='grid grid-cols-3 gap-2 mt-3'>{stats_html}</div>"
+            f"<p class='text-xs text-slate-400 mt-2'>{caption}</p>"
+        )
+    body = plan_html + garmin_html
+
     try:
         weather_data = running_agent.get_data()
         running_insight = running_agent.get_insight(weather_data)
@@ -433,26 +428,36 @@ def dashboard():
         print(f"[ERROR] running_insight: {e}", file=sys.stderr)
         insight_html = render_error("Could not generate running insight")
     body += insight_html
+    cards.append(render_card("🏃", "Today's Training", body))
 
-    body += f"""
-    <form method="POST" action="/add-run" class="mt-4 border-t border-slate-100 pt-4 flex flex-col gap-2">
-      <div class="grid grid-cols-2 gap-2">
-        <input type="date" name="date" required value="{formatting.today_in_tz(tz_name).isoformat()}"
-               class="col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
-        <input type="number" step="0.01" min="0" name="distance_km" placeholder="Distance (km)" required
-               class="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
-        <input type="number" min="0" name="duration_min" placeholder="Duration (min)" required
-               class="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
-        <input type="text" name="notes" placeholder="Notes"
-               class="col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
-      </div>
-      <button type="submit"
-              class="bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium transition-colors">
-        Add Run
-      </button>
-    </form>
-    """
-    cards.append(render_card("🏃", "Training Log", body))
+    if garmin_data is not None:
+        weeks = garmin_data["weekly_km"]
+        max_km = max([km for _, km in weeks] + [1])
+        bars = "".join(
+            f"<div class='flex items-center gap-2 text-sm'>"
+            f"<span class='w-12 text-slate-400'>{week_start.strftime('%d/%m')}</span>"
+            f"<div class='flex-1 bg-slate-100 rounded h-3'>"
+            f"<div class='bg-indigo-400 h-3 rounded' style='width:{km / max_km * 100:.0f}%'></div></div>"
+            f"<span class='w-14 text-right font-medium text-slate-700'>{km} km</span></div>"
+            for week_start, km in weeks
+        )
+        runs = garmin_data["runs"]
+        if runs:
+            last = runs[0]
+            hr_html = f" &middot; HR {last['avg_hr']:.0f}" if last.get("avg_hr") else ""
+            last_html = (
+                f"<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-1 mt-4'>Last run</p>"
+                f"<p class='text-sm'><span class='text-slate-400'>{formatting.format_date(last['start_time_local'][:10])}</span> &mdash; "
+                f"<span class='font-medium text-slate-800'>{(last['distance_m'] or 0) / 1000:.1f} km</span> "
+                f"&middot; {garmin_agent.format_pace(last['avg_pace_s_per_km'])}/km{hr_html}</p>"
+            )
+        else:
+            last_html = "<p class='text-slate-400 text-sm mt-4'>No runs in the last 5 weeks.</p>"
+        body = (
+            "<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-2'>Weekly distance</p>"
+            f"<div class='flex flex-col gap-1.5'>{bars}</div>{last_html}"
+        )
+        cards.append(render_card("📈", "Running Volume", body))
 
     now_local = formatting.now_in_tz(tz_name)
     header_subtitle = f"{now_local.strftime('%A, %B')} {now_local.day}, {now_local.year}"
@@ -558,16 +563,6 @@ def dashboard():
     </body>
     </html>
     """
-
-
-@app.route("/add-run", methods=["POST"])
-def add_run():
-    run_date = request.form["date"]
-    distance_km = float(request.form["distance_km"])
-    duration_min = int(request.form["duration_min"])
-    notes = request.form.get("notes", "")
-    add_training_run(run_date, distance_km, duration_min, notes)
-    return redirect(url_for("dashboard"))
 
 
 @app.route("/agent-action", methods=["POST"])
