@@ -25,7 +25,6 @@ from agents import (
     formatting,
     garmin_agent,
     google_auth,
-    running_agent,
     voice_agent,
     weather_agent,
 )
@@ -231,15 +230,43 @@ def dashboard():
 
     weather_result = None
     try:
+        conditions = weather_agent.get_running_conditions(LATITUDE, LONGITUDE)
         weather_result = weather_agent.get_current_weather(LATITUDE, LONGITUDE)
-        body = render_list([
-            f"Temperature: <span class='font-medium text-slate-800'>{weather_result['temperature']}&deg;C</span>",
-            f"Wind speed: <span class='font-medium text-slate-800'>{weather_result['windspeed']} km/h</span>",
-        ])
+        advice = weather_agent.recommend_run(
+            conditions, garmin_agent.get_planned_workout(formatting.today_in_tz(tz_name))
+        )
+        air = f"{conditions['aqi']:.0f}" if conditions.get("aqi") is not None else "–"
+        pm10 = f"{conditions['pm10']:.0f}" if conditions.get("pm10") is not None else "–"
+        stats = [
+            ("Temp", f"{conditions['temperature']:.0f}&deg;"),
+            ("Feels like", f"{conditions['feels_like']:.0f}&deg;"),
+            ("Humidity", f"{conditions['humidity']:.0f}%"),
+            ("Dew point", f"{conditions['dew_point']:.0f}&deg;"),
+            ("Wind", f"{conditions['windspeed']:.0f} km/h"),
+            ("Air (AQI / PM10)", f"{air} / {pm10}"),
+        ]
+        stats_html = "".join(
+            f"<div class='bg-slate-50 rounded-lg p-2'><p class='text-xs text-slate-400'>{label}</p>"
+            f"<p class='font-semibold text-slate-800'>{value}</p></div>"
+            for label, value in stats
+        )
+        colors = {
+            "good": ("bg-emerald-50", "border-emerald-400", "text-emerald-900"),
+            "warn": ("bg-amber-50", "border-amber-400", "text-amber-900"),
+            "bad": ("bg-rose-50", "border-rose-400", "text-rose-900"),
+        }[advice["level"]]
+        tips_html = "".join(f"<li>{tip}</li>" for tip in advice["tips"])
+        body = f"""
+        <div class="grid grid-cols-3 gap-2">{stats_html}</div>
+        <div dir="rtl" class="mt-3 {colors[0]} border-r-4 {colors[1]} rounded-l-lg p-3 {colors[2]}">
+          <p class="font-semibold text-sm">{advice["verdict"]}</p>
+          <ul class="list-disc pr-5 mt-1 text-sm flex flex-col gap-0.5">{tips_html}</ul>
+        </div>
+        """
     except Exception as e:
         print(f"[ERROR] weather: {e}", file=sys.stderr)
         body = render_error("Could not fetch weather")
-    cards.append(render_card("☀️", "Weather in Tel Aviv", body))
+    cards.append(render_card("🌤️", "Run Weather · Tel Aviv", body))
 
     days_remaining = (MARATHON_DATE - formatting.today_in_tz(tz_name)).days
     if days_remaining > 0:
@@ -415,19 +442,6 @@ def dashboard():
         )
     body = plan_html + garmin_html
 
-    try:
-        weather_data = running_agent.get_data()
-        running_insight = running_agent.get_insight(weather_data)
-        insight_html = f"""
-        <div class="mt-3 bg-emerald-50 border-l-4 border-emerald-400 rounded-r-lg p-3">
-          <p class="text-xs uppercase tracking-wide text-emerald-600 font-semibold mb-1">Should You Run Today?</p>
-          <p class="text-emerald-900 text-sm">{running_insight}</p>
-        </div>
-        """
-    except Exception as e:
-        print(f"[ERROR] running_insight: {e}", file=sys.stderr)
-        insight_html = render_error("Could not generate running insight")
-    body += insight_html
     cards.append(render_card("🏃", "Today's Training", body))
 
     if garmin_data is not None:
