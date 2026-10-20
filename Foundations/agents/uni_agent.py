@@ -1,13 +1,15 @@
-"""University alerts: Moodle deadlines (calendar export) and actionable mails from the uni address.
+"""University alerts: Moodle deadlines (calendar export) and every mail to the uni address.
 
 Moodle: Calendar → Import or export calendars → Export → "All courses" + "Recent and next 60 days"
 → Get calendar URL. That URL (with its personal token) goes in MOODLE_ICAL_URL.
 
-Mail: every forwarded mail to the uni address is read once by Claude, which decides whether it
-needs action (new assignment, deadline, exam, cancelled class...). Only those become a push.
+Mail: every forwarded mail to the uni address (newsletters included) is read once by Claude,
+which writes a short Hebrew push and pulls out a deadline when there is one.
 
-What was already sent is kept in the Supabase table uni_alerts (see garmin/uni_schema.sql),
-so a restart or a redeploy never repeats a notification.
+Anything with a deadline becomes a task in the Supabase table uni_tasks. Tasks get a push when
+they appear, halfway to the deadline, two days before, on the day, and once after it if they were
+not marked done on the dashboard. Every push sent is logged in uni_alerts, so nothing repeats
+(see garmin/uni_schema.sql).
 """
 import base64
 import html
@@ -28,19 +30,33 @@ from agents import formatting, google_auth, push_agent
 
 load_dotenv()
 
+TASKS_TABLE = "uni_tasks"
 ALERTS_TABLE = "uni_alerts"
 MOODLE_URL = os.environ.get("MOODLE_URL", "https://moodle.runi.ac.il/my/")
-NEW_EVENT_WINDOW = timedelta(days=14)
-REMINDERS = [("48h", timedelta(hours=48), "בעוד יומיים"), ("12h", timedelta(hours=12), "היום")]
+DASHBOARD_URL = "/#uni"
 MAX_PUSHES_PER_RUN = 5
 MAIL_LOOKBACK_DAYS = 2
+MIDPOINT_MIN_LEAD = timedelta(days=5)
+OVERDUE_GRACE = timedelta(hours=2)
+OVERDUE_WINDOW = timedelta(days=3)
+# A reminder the checker missed by more than this (the server was down) is skipped, not sent late.
+STALE_AFTER = timedelta(hours=6)
+
+KIND_ICONS = {
+    "assignment": "📚", "exam": "📝", "cancellation": "🚫", "grade": "🎓",
+    "newsletter": "📰", "other": "📬", "moodle": "📚",
+}
 
 _events_cache = {"at": 0, "events": None}
-EVENTS_CACHE_SECONDS = 15 * 60
+EVENTS_CACHE_SECONDS = 5 * 60
 
 
 def is_configured():
     return bool(os.environ.get("MOODLE_ICAL_URL"))
+
+
+def tasks_configured():
+    return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SECRET_KEY"))
 
 
 # ---------- Moodle calendar ----------
@@ -95,7 +111,7 @@ def parse_ical(text):
 
 
 def get_upcoming(days=60):
-    """Upcoming Moodle events, soonest first (cached for 15 minutes)."""
+    """Upcoming Moodle events, soonest first (cached for 5 minutes)."""
     if _events_cache["events"] is None or time.time() - _events_cache["at"] > EVENTS_CACHE_SECONDS:
         response = requests.get(os.environ["MOODLE_ICAL_URL"], timeout=20)
         response.raise_for_status()
@@ -110,18 +126,29 @@ def get_upcoming(days=60):
 def format_due(due):
     local = due.astimezone(formatting.ISRAEL_TZ)
     days = (local.date() - formatting.today_in_tz()).days
-    when = {0: "היום", 1: "מחר"}.get(days, local.strftime("%d/%m"))
+    when = {0: "היום", 1: "מחר", -1: "אתמול"}.get(days, local.strftime("%d/%m"))
     return f"{when} {local.strftime('%H:%M')}"
 
 
-# ---------- Sent-alert log (Supabase) ----------
+def _parse_ts(value):
+    return datetime.fromisoformat(value) if value else None
+
+
+# ---------- Supabase tables ----------
+
+def _in_filter(keys):
+    return "in.(" + ",".join('"' + k.replace('"', "") + '"' for k in keys) + ")"
+
 
 def _already_sent(keys):
     if not keys:
         return set()
-    quoted = ",".join('"' + k.replace('"', "") + '"' for k in keys)
-    rows = push_agent.rest("GET", ALERTS_TABLE, params={"select": "key", "key": f"in.({quoted})"})
-    return {row["key"] for row in rows}
+    sent = set()
+    keys = list(keys)
+    for start in range(0, len(keys), 100):
+        rows = push_agent.rest("GET", ALERTS_TABLE, params={"select": "key", "key": _in_filter(keys[start:start + 100])})
+        sent.update(row["key"] for row in rows)
+    return sent
 
 
 def _mark_sent(keys):
@@ -129,9 +156,49 @@ def _mark_sent(keys):
         push_agent.rest(
             "POST", ALERTS_TABLE,
             params={"on_conflict": "key"},
-            payload=[{"key": k} for k in keys],
+            payload=[{"key": k} for k in sorted(set(keys))],
             prefer="resolution=ignore-duplicates",
         )
+
+
+def _get_tasks(keys):
+    if not keys:
+        return {}
+    rows = push_agent.rest("GET", TASKS_TABLE, params={"select": "*", "key": _in_filter(keys)})
+    return {row["key"]: row for row in rows}
+
+
+def _save_tasks(tasks):
+    """Insert or update tasks. Only the listed columns change, so done/first_seen survive."""
+    if tasks:
+        push_agent.rest(
+            "POST", TASKS_TABLE,
+            params={"on_conflict": "key"},
+            payload=tasks,
+            prefer="resolution=merge-duplicates",
+        )
+
+
+def list_tasks():
+    """Open tasks plus the ones marked done in the last week, soonest deadline first."""
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    rows = push_agent.rest("GET", TASKS_TABLE, params={
+        "select": "*",
+        "or": f'(done.is.false,done_at.gte."{since}")',
+        "order": "due.asc.nullslast",
+        "limit": "200",
+    })
+    for row in rows:
+        row["due"] = _parse_ts(row.get("due"))
+    return rows
+
+
+def set_done(key, done):
+    push_agent.rest(
+        "PATCH", TASKS_TABLE,
+        params={"key": f"eq.{key}"},
+        payload={"done": done, "done_at": datetime.now(timezone.utc).isoformat() if done else None},
+    )
 
 
 # ---------- Mail ----------
@@ -173,26 +240,28 @@ def _mail_text(payload):
 MAIL_SCHEMA = {
     "type": "object",
     "properties": {
-        "alert": {"type": "boolean"},
+        "kind": {"type": "string", "enum": ["assignment", "exam", "cancellation", "grade", "newsletter", "other"]},
         "title": {"type": "string"},
         "body": {"type": "string"},
+        "due": {"type": "string"},
     },
-    "required": ["alert", "title", "body"],
+    "required": ["kind", "title", "body", "due"],
     "additionalProperties": False,
 }
 
-MAIL_PROMPT = """You read mails sent to a Reichman University student (business & entrepreneurship).
-Decide if this mail needs his attention: a new assignment or homework, a deadline or a changed
-deadline, an exam or quiz, a cancelled / moved / online class, a room change, a published grade,
-or anything he must do or answer. Newsletters, events, marketing, surveys and general
-announcements are NOT alerts.
+MAIL_PROMPT = """You read mails sent to a Reichman University student (business & entrepreneurship)
+and turn each one into a phone notification.
 
-If it is an alert, write in Hebrew: "title" is the course or sender plus the topic (max 40 chars),
-"body" is what is needed and by when (max 120 chars). Otherwise return alert=false and empty strings.
+"kind": assignment (homework, submission, project), exam (exam or quiz), cancellation (class
+cancelled, moved, online, room change), grade (grade published), newsletter (newsletters, events,
+announcements, surveys), or other.
+"title": in Hebrew, the course or sender plus the topic, max 40 characters.
+"body": in Hebrew, the one thing he needs to know or do, and by when, max 120 characters.
+"due": the deadline or exam time as YYYY-MM-DDTHH:MM in Israel time (YYYY-MM-DD when there is no
+hour), only for assignment or exam; otherwise an empty string. The mail was sent on {date}.
 
 From: {sender}
 Subject: {subject}
-Date: {date}
 
 {text}"""
 
@@ -210,7 +279,20 @@ def classify_mail(sender, subject, sent_at, text):
     return json.loads(next(b.text for b in response.content if b.type == "text"))
 
 
-def _new_mail_alerts():
+def _parse_mail_due(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if len(value) == 10:
+        parsed = parsed.replace(hour=23, minute=59)
+    return parsed.replace(tzinfo=formatting.ISRAEL_TZ) if parsed.tzinfo is None else parsed
+
+
+def _check_mail():
+    """Push for every new uni mail. Returns (alerts, processed keys, new tasks)."""
     creds = google_auth.get_credentials(google_auth.SCOPES)
     service = build("gmail", "v1", credentials=creds)
     listing = service.users().messages().list(
@@ -219,8 +301,8 @@ def _new_mail_alerts():
     ids = [m["id"] for m in listing.get("messages", [])]
     sent = _already_sent([f"mail:{i}" for i in ids])
 
-    alerts, checked = [], []
-    for message_id in ids:
+    alerts, processed, tasks = [], [], []
+    for message_id in reversed(ids):  # oldest first
         key = f"mail:{message_id}"
         if key in sent:
             continue
@@ -235,84 +317,135 @@ def _new_mail_alerts():
             # Leave it unmarked so the next run tries again.
             print(f"[ERROR] uni mail classify {message_id}: {e}", file=sys.stderr)
             continue
-        checked.append(key)
-        if verdict["alert"]:
-            alerts.append({
-                "key": key,
-                "title": "📬 " + verdict["title"],
-                "body": verdict["body"],
-                "url": f"https://mail.google.com/mail/u/0/#all/{message_id}",
+        processed.append(key)
+        url = f"https://mail.google.com/mail/u/0/#all/{message_id}"
+        due = _parse_mail_due(verdict["due"]) if verdict["kind"] in ("assignment", "exam") else None
+        if due and due > datetime.now(timezone.utc):
+            tasks.append({
+                "key": key, "source": "mail", "kind": verdict["kind"], "title": verdict["title"],
+                "course": None, "due": due.isoformat(), "url": url,
             })
-    return alerts, checked
+            url = DASHBOARD_URL
+        alerts.append({
+            "key": key,
+            "title": f"{KIND_ICONS[verdict['kind']]} {verdict['title']}",
+            "body": verdict["body"],
+            "url": url,
+        })
+    return alerts, processed, tasks
 
 
-# ---------- Moodle alerts ----------
+# ---------- Moodle ----------
 
-def _moodle_alerts():
+def _check_moodle():
+    """New Moodle deadlines and changed due dates. Returns (alerts, tasks to save)."""
     events = get_upcoming()
-    now = datetime.now(timezone.utc)
-    candidates = {}
+    known = _get_tasks([f"ical:{e['uid']}" for e in events])
+    alerts, tasks = [], []
     for event in events:
-        left = event["due"] - now
+        key = f"ical:{event['uid']}"
         course = f" · {event['course']}" if event.get("course") else ""
-        base = {"url": MOODLE_URL}
-        candidates[f"ical:{event['uid']}:new"] = event, left <= NEW_EVENT_WINDOW, {
-            **base,
-            "title": "📚 מטלה חדשה" + course,
-            "body": f"{event.get('title', '')} — עד {format_due(event['due'])}",
-        }
-        for name, window, label in REMINDERS:
-            candidates[f"ical:{event['uid']}:{name}"] = event, left <= window, {
-                **base,
-                "title": f"⏰ {label}" + course,
-                "body": f"{event.get('title', '')} — עד {format_due(event['due'])}",
-            }
+        text = f"{event.get('title', '')} — עד {format_due(event['due'])}"
+        old = known.get(key)
+        if old is None:
+            alerts.append({"key": f"{key}:new", "title": "📚 חדש במודל" + course, "body": text, "url": DASHBOARD_URL})
+        elif _parse_ts(old["due"]) != event["due"]:
+            alerts.append({
+                "key": f"{key}:moved:{event['due'].isoformat()}",
+                "title": "🔁 המועד השתנה" + course, "body": text, "url": DASHBOARD_URL,
+            })
+        tasks.append({
+            "key": key, "source": "moodle", "kind": "moodle", "title": event.get("title", ""),
+            "course": event.get("course"), "due": event["due"].isoformat(), "url": MOODLE_URL,
+        })
+    return alerts, tasks
 
-    sent = _already_sent(list(candidates))
+
+# ---------- Reminders ----------
+
+def _stages(task, now):
+    """Reminder stages of an open task whose time has come, in order: (name, time, title)."""
+    due, first_seen = task["due"], task["first_seen"]
+    lead = due - first_seen
+    stages = []
+    if lead >= MIDPOINT_MIN_LEAD:
+        stages.append(("mid", first_seen + lead / 2, f"⏳ עבר חצי מהזמן · נשארו {(due - now).days} ימים"))
+    stages.append(("48h", due - timedelta(hours=48), "⏰ בעוד יומיים"))
+    stages.append(("12h", due - timedelta(hours=12), "⏰ היום"))
+    if now - due <= OVERDUE_WINDOW:
+        stages.append(("over", due + OVERDUE_GRACE, "⚠️ עבר המועד, לא סומן כבוצע"))
+    return [stage for stage in stages if stage[1] <= now]
+
+
+def _reminders(fresh_keys):
+    """One push per open task per run (the latest stage wins). Returns (alerts, quiet keys)."""
+    now = datetime.now(timezone.utc)
+    tasks = [t for t in list_tasks() if not t["done"] and t["due"]]
+    candidates = {}
+    for task in tasks:
+        task["first_seen"] = _parse_ts(task["first_seen"])
+        due_tag = task["due"].isoformat()
+        candidates[task["key"]] = [(f"{task['key']}:{name}:{due_tag}", at, title) for name, at, title in _stages(task, now)]
+    sent = _already_sent([k for stages in candidates.values() for k, _, _ in stages])
+
     alerts, quiet = [], []
-    for event in events:
-        due_keys = [k for k in candidates if k.startswith(f"ical:{event['uid']}:") and candidates[k][1]]
-        fresh = [k for k in due_keys if k not in sent]
-        if not fresh:
+    for task in tasks:
+        pending = [stage for stage in candidates[task["key"]] if stage[0] not in sent]
+        if not pending:
             continue
-        # One push per event per run: the most urgent reminder wins, the rest are marked as done.
-        chosen = fresh[-1]
-        alerts.append({"key": chosen, **candidates[chosen][2]})
-        quiet.extend(k for k in fresh if k != chosen)
+        key, at, title = pending[-1]
+        if task["key"] in fresh_keys or now - at > STALE_AFTER:
+            # Just announced or changed this run, or missed while the server was down: skip.
+            quiet.extend(k for k, _, _ in pending)
+            continue
+        quiet.extend(k for k, _, _ in pending[:-1])
+        course = f" · {task['course']}" if task.get("course") else ""
+        alerts.append({
+            "key": key, "title": title + course,
+            "body": f"{task['title']} — עד {format_due(task['due'])}. לסמן בוצע בדשבורד.",
+            "url": DASHBOARD_URL,
+        })
     return alerts, quiet
 
 
 # ---------- Scheduled run ----------
 
 def run_check():
-    alerts, done = [], []
-    errors = []
+    alerts, done, errors = [], [], []
+    fresh = set()
     if is_configured():
         try:
-            found, quiet = _moodle_alerts()
+            found, tasks = _check_moodle()
+            _save_tasks(tasks)
             alerts += found
-            done += quiet
+            fresh.update(a["key"].split(":new")[0].split(":moved:")[0] for a in found)
         except Exception as e:
             print(f"[ERROR] uni moodle: {e}", file=sys.stderr)
             errors.append("moodle")
     try:
-        found, checked = _new_mail_alerts()
+        found, processed, tasks = _check_mail()
+        _save_tasks(tasks)
         alerts += found
-        done += checked
+        done += processed
+        fresh.update(t["key"] for t in tasks)
     except Exception as e:
         print(f"[ERROR] uni mail: {e}", file=sys.stderr)
         errors.append("mail")
+    try:
+        found, quiet = _reminders(fresh)
+        alerts += found
+        done += quiet
+    except Exception as e:
+        print(f"[ERROR] uni reminders: {e}", file=sys.stderr)
+        errors.append("reminders")
 
-    pushed = 0
     for alert in alerts[:MAX_PUSHES_PER_RUN]:
         push_agent.send_to_all(alert["title"], alert["body"], alert["url"])
-        pushed += 1
     if len(alerts) > MAX_PUSHES_PER_RUN:
         push_agent.send_to_all(
             "📚 עוד עדכונים מהלימודים",
             f"יש עוד {len(alerts) - MAX_PUSHES_PER_RUN} עדכונים. הכול בכרטיס הלימודים ב-Shaked Hub.",
-            "/",
+            DASHBOARD_URL,
         )
-        pushed += 1
     _mark_sent(done + [a["key"] for a in alerts])
-    return {"ok": not errors, "errors": errors, "alerts": len(alerts), "pushed": pushed}
+    return {"ok": not errors, "errors": errors, "alerts": len(alerts)}

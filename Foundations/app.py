@@ -343,24 +343,43 @@ def dashboard():
         body = render_error("Could not fetch calendar events")
     cards.append(render_card("📅", "Today's Calendar", body))
 
-    if uni_agent.is_configured():
+    if uni_agent.tasks_configured():
         try:
-            upcoming = [e for e in uni_agent.get_upcoming() if e["due"] <= formatting.now_in_tz(tz_name) + timedelta(days=14)]
-            if not upcoming:
-                body = "<p class='text-slate-400'>אין הגשות בשבועיים הקרובים.</p>"
+            tasks = uni_agent.list_tasks()
+            now = formatting.now_in_tz(tz_name)
+            open_tasks = [t for t in tasks if not t["done"]]
+            done_tasks = [t for t in tasks if t["done"]]
+            if not tasks:
+                body = "<p class='text-slate-400'>אין מטלות פתוחות.</p>"
             else:
                 items = []
-                for event in upcoming[:8]:
-                    course = f"<span class='text-slate-400'> · {html.escape(event['course'])}</span>" if event.get("course") else ""
+                for task in open_tasks + done_tasks:
+                    overdue = not task["done"] and task["due"] and task["due"] < now
+                    when = uni_agent.format_due(task["due"]) if task["due"] else ""
+                    if overdue:
+                        when = f"<span class='text-rose-600 font-semibold'>לא בוצע · {when}</span>"
+                    else:
+                        when = f"<span class='font-semibold text-slate-700'>{when}</span>"
+                    course = f"<span class='text-slate-400'> · {html.escape(task['course'])}</span>" if task.get("course") else ""
+                    title = html.escape(task["title"])
+                    if task.get("url"):
+                        title = f"<a href='{html.escape(task['url'])}' target='_blank' class='hover:underline'>{title}</a>"
+                    button = "בטל" if task["done"] else "✓ בוצע"
+                    style = "line-through text-slate-400" if task["done"] else ""
                     items.append(
-                        f"<span class='font-semibold text-slate-700'>{uni_agent.format_due(event['due'])}</span>"
-                        f" &mdash; {html.escape(event.get('title', ''))}{course}"
+                        f"<div class='flex items-start justify-between gap-2'>"
+                        f"<div class='{style}'>{when} &mdash; {title}{course}</div>"
+                        f"<form method='POST' action='/uni/done'>"
+                        f"<input type='hidden' name='key' value='{html.escape(task['key'])}'>"
+                        f"<input type='hidden' name='done' value='{'0' if task['done'] else '1'}'>"
+                        f"<button class='shrink-0 text-xs rounded-lg px-2 py-1 bg-slate-100 hover:bg-emerald-100'>{button}</button>"
+                        f"</form></div>"
                     )
-                body = f"<div dir='rtl'>{render_list(items)}</div>"
+                body = f"<div id='uni' dir='rtl'>{render_list(items)}</div>"
         except Exception as e:
             print(f"[ERROR] uni card: {e}", file=sys.stderr)
-            body = render_error("Could not fetch Moodle deadlines")
-        cards.append(render_card("📚", "Upcoming deadlines", body))
+            body = render_error("Could not fetch university tasks")
+        cards.append(render_card("📚", "University tasks", body))
 
     email_result = None
     try:
@@ -709,6 +728,17 @@ def check_uni_mail():
     except Exception as e:
         print(f"[ERROR] check_uni_mail: {e}", file=sys.stderr)
         return jsonify({"error": "Check failed"}), 500
+
+
+@app.route("/uni/done", methods=["POST"])
+def uni_done():
+    key = request.form.get("key", "")
+    if key:
+        try:
+            uni_agent.set_done(key, request.form.get("done") == "1")
+        except Exception as e:
+            print(f"[ERROR] uni_done: {e}", file=sys.stderr)
+    return redirect("/#uni")
 
 
 @app.route("/tasks/check-uni", methods=["POST"])

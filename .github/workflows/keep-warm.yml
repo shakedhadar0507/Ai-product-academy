@@ -1,16 +1,22 @@
-name: Keep Shaked Hub awake
+name: Keep Shaked Hub awake and check university alerts
 
 # Render's free tier sleeps after 15 minutes without traffic, and waking takes
-# about a minute. A ping every 10 minutes keeps it awake; one always-on service
-# fits inside the free 750 hours a month.
+# about a minute. A call every 10 minutes keeps it awake; one always-on service
+# fits inside the free 750 hours a month. The same call checks Moodle and the
+# uni mail and pushes any new alert to the phone.
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 
 jobs:
-  ping:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping the login page
-        run: curl -fsS -o /dev/null --retry 2 --retry-delay 20 --max-time 90 https://ai-product-academy.onrender.com/login
+      - name: Check university alerts
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl -fsS --retry 2 --retry-delay 20 --retry-all-errors --max-time 120 \
+            -X POST -H "X-Cron-Secret: $CRON_SECRET" \
+            https://ai-product-academy.onrender.com/tasks/check-uni
