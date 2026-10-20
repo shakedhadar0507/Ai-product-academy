@@ -1,3 +1,4 @@
+import html
 import os
 import secrets
 import sys
@@ -26,6 +27,7 @@ from agents import (
     garmin_agent,
     google_auth,
     push_agent,
+    uni_agent,
     voice_agent,
     weather_agent,
 )
@@ -45,7 +47,7 @@ app.config.update(
 # The home-screen app can't send a Basic Auth header, so login is a form that
 # sets a 30-day session cookie. The PWA files must load before login.
 # The scheduled check authenticates with CRON_SECRET instead.
-PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/tasks/check-uni-mail"}
+PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/tasks/check-uni-mail", "/tasks/check-uni"}
 
 
 def credentials_valid(given_username, given_password):
@@ -340,6 +342,25 @@ def dashboard():
         print(f"[ERROR] calendar: {e}", file=sys.stderr)
         body = render_error("Could not fetch calendar events")
     cards.append(render_card("📅", "Today's Calendar", body))
+
+    if uni_agent.is_configured():
+        try:
+            upcoming = [e for e in uni_agent.get_upcoming() if e["due"] <= formatting.now_in_tz(tz_name) + timedelta(days=14)]
+            if not upcoming:
+                body = "<p class='text-slate-400'>אין הגשות בשבועיים הקרובים.</p>"
+            else:
+                items = []
+                for event in upcoming[:8]:
+                    course = f"<span class='text-slate-400'> · {html.escape(event['course'])}</span>" if event.get("course") else ""
+                    items.append(
+                        f"<span class='font-semibold text-slate-700'>{uni_agent.format_due(event['due'])}</span>"
+                        f" &mdash; {html.escape(event.get('title', ''))}{course}"
+                    )
+                body = f"<div dir='rtl'>{render_list(items)}</div>"
+        except Exception as e:
+            print(f"[ERROR] uni card: {e}", file=sys.stderr)
+            body = render_error("Could not fetch Moodle deadlines")
+        cards.append(render_card("📚", "Upcoming deadlines", body))
 
     email_result = None
     try:
@@ -687,6 +708,18 @@ def check_uni_mail():
         return jsonify(push_agent.check_uni_mail())
     except Exception as e:
         print(f"[ERROR] check_uni_mail: {e}", file=sys.stderr)
+        return jsonify({"error": "Check failed"}), 500
+
+
+@app.route("/tasks/check-uni", methods=["POST"])
+def check_uni():
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    try:
+        return jsonify(uni_agent.run_check())
+    except Exception as e:
+        print(f"[ERROR] check_uni: {e}", file=sys.stderr)
         return jsonify({"error": "Check failed"}), 500
 
 
