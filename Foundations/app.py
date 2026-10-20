@@ -566,7 +566,7 @@ def dashboard():
           }}).then(function(existing) {{
             if (existing && Notification.permission === 'granted') {{
               status.textContent = 'Notifications are on for this device ✅';
-              button.remove();
+              button.textContent = 'Send a test notification';
             }}
           }});
           button.addEventListener('click', function() {{
@@ -575,7 +575,12 @@ def dashboard():
               if (permission !== 'granted') throw new Error('denied');
               return navigator.serviceWorker.ready;
             }}).then(function(reg) {{
-              return reg.pushManager.subscribe({{ userVisibleOnly: true, applicationServerKey: toBytes(button.dataset.key) }});
+              // Start from a fresh subscription so a changed server key never leaves a stale one behind.
+              return reg.pushManager.getSubscription().then(function(existing) {{
+                return existing ? existing.unsubscribe() : null;
+              }}).then(function() {{
+                return reg.pushManager.subscribe({{ userVisibleOnly: true, applicationServerKey: toBytes(button.dataset.key) }});
+              }});
             }}).then(function(subscription) {{
               return fetch('/push/subscribe', {{
                 method: 'POST',
@@ -585,7 +590,8 @@ def dashboard():
             }}).then(function(r) {{
               if (!r.ok) throw new Error('save failed');
               status.textContent = 'Notifications are on for this device ✅';
-              button.remove();
+              button.textContent = 'Send a test notification';
+              button.disabled = false;
             }}).catch(function(e) {{
               status.textContent = e.message === 'denied'
                 ? 'Notifications are blocked. Allow them in Settings > Notifications > Shaked Hub.'
