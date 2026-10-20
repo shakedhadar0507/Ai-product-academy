@@ -1,0 +1,21 @@
+name: Weekly university mail check
+
+# Sundays 07:00 Israel time. Pushes a phone alert from Shaked Hub if no
+# forwarded university mail reached Gmail in the past week.
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Shaked Hub
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          # Render's free tier sleeps, so the first request may take a minute to wake it.
+          curl -fsS --retry 3 --retry-delay 30 --retry-all-errors --max-time 120 \
+            -X POST -H "X-Cron-Secret: $CRON_SECRET" \
+            https://ai-product-academy.onrender.com/tasks/check-uni-mail

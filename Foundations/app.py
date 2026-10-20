@@ -25,6 +25,7 @@ from agents import (
     formatting,
     garmin_agent,
     google_auth,
+    push_agent,
     voice_agent,
     weather_agent,
 )
@@ -43,7 +44,8 @@ app.config.update(
 
 # The home-screen app can't send a Basic Auth header, so login is a form that
 # sets a 30-day session cookie. The PWA files must load before login.
-PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy"}
+# The scheduled check authenticates with CRON_SECRET instead.
+PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/tasks/check-uni-mail"}
 
 
 def credentials_valid(given_username, given_password):
@@ -302,6 +304,15 @@ def dashboard():
     )
     cards.append(render_card("🏁", "Marathon Countdown", body))
 
+    if push_agent.is_configured():
+        body = (
+            "<p id='push-status' class='text-sm text-slate-500'>Get an alert on this device when something needs you.</p>"
+            "<button id='push-button' data-key='" + push_agent.public_key() + "' "
+            "class='mt-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium'>"
+            "Enable notifications</button>"
+        )
+        cards.append(render_card("🔔", "Notifications", body))
+
     calendar_result = None
     try:
         events = calendar_agent.get_data(tz_name)
@@ -538,6 +549,54 @@ def dashboard():
       </main>
       <script>
         (function() {{
+          var button = document.getElementById('push-button');
+          var status = document.getElementById('push-status');
+          if (!button) return;
+          if (!('serviceWorker' in navigator) || !('PushManager' in window)) {{
+            status.textContent = 'On iPhone, open Shaked Hub from the home screen to enable notifications.';
+            button.remove();
+            return;
+          }}
+          function toBytes(base64) {{
+            var padded = (base64 + '='.repeat((4 - base64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+            return Uint8Array.from(atob(padded), function(c) {{ return c.charCodeAt(0); }});
+          }}
+          navigator.serviceWorker.ready.then(function(reg) {{
+            return reg.pushManager.getSubscription();
+          }}).then(function(existing) {{
+            if (existing && Notification.permission === 'granted') {{
+              status.textContent = 'Notifications are on for this device ✅';
+              button.remove();
+            }}
+          }});
+          button.addEventListener('click', function() {{
+            button.disabled = true;
+            Notification.requestPermission().then(function(permission) {{
+              if (permission !== 'granted') throw new Error('denied');
+              return navigator.serviceWorker.ready;
+            }}).then(function(reg) {{
+              return reg.pushManager.subscribe({{ userVisibleOnly: true, applicationServerKey: toBytes(button.dataset.key) }});
+            }}).then(function(subscription) {{
+              return fetch('/push/subscribe', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(subscription)
+              }});
+            }}).then(function(r) {{
+              if (!r.ok) throw new Error('save failed');
+              status.textContent = 'Notifications are on for this device ✅';
+              button.remove();
+            }}).catch(function(e) {{
+              status.textContent = e.message === 'denied'
+                ? 'Notifications are blocked. Allow them in Settings > Notifications > Shaked Hub.'
+                : 'Could not enable notifications. Try again.';
+              button.disabled = false;
+            }});
+          }});
+        }})();
+      </script>
+      <script>
+        (function() {{
           var micButton = document.getElementById('mic-button');
           var textInput = document.getElementById('agent-text-input');
           if (!micButton || micButton.disabled || !textInput) return;
@@ -595,6 +654,34 @@ def dashboard():
     </body>
     </html>
     """
+
+
+@app.route("/push/subscribe", methods=["POST"])
+def push_subscribe():
+    if not push_agent.is_configured():
+        return jsonify({"error": "Push not configured"}), 503
+    subscription = request.get_json(silent=True) or {}
+    if not subscription.get("endpoint"):
+        return jsonify({"error": "Missing subscription"}), 400
+    try:
+        push_agent.save_subscription(subscription)
+        push_agent.send_to_all("🔔 Shaked Hub", "ההתראות פועלות במכשיר הזה.")
+        return jsonify({"ok": True})
+    except Exception as e:
+        print(f"[ERROR] push_subscribe: {e}", file=sys.stderr)
+        return jsonify({"error": "Could not save subscription"}), 500
+
+
+@app.route("/tasks/check-uni-mail", methods=["POST"])
+def check_uni_mail():
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    try:
+        return jsonify(push_agent.check_uni_mail())
+    except Exception as e:
+        print(f"[ERROR] check_uni_mail: {e}", file=sys.stderr)
+        return jsonify({"error": "Check failed"}), 500
 
 
 @app.route("/agent-action", methods=["POST"])
