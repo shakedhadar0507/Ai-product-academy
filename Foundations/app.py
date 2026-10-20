@@ -43,7 +43,7 @@ app.config.update(
 
 # The home-screen app can't send a Basic Auth header, so login is a form that
 # sets a 30-day session cookie. The PWA files must load before login.
-PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js"}
+PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy"}
 
 
 def credentials_valid(given_username, given_password):
@@ -113,6 +113,24 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+PRIVACY_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shaked Hub - Privacy</title></head>
+<body style="font-family: sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; line-height: 1.5;">
+<h1>Shaked Hub privacy policy</h1>
+<p>Shaked Hub is a personal dashboard used only by its owner. It reads the owner's Google Calendar and Gmail
+to show events and unread mail, and can create calendar events and email drafts when the owner asks.</p>
+<p>Data is used only to display this dashboard. It is not sold, shared or used for advertising, and nothing is
+stored beyond short-lived caches and an access token kept on the server.</p>
+<p>Access can be revoked at any time from <a href="https://myaccount.google.com/permissions">Google account permissions</a>.</p>
+</body></html>"""
+
+
+@app.route("/privacy")
+def privacy():
+    return PRIVACY_PAGE
 
 
 @app.route("/manifest.webmanifest")
