@@ -34,13 +34,14 @@ def public_key():
     return os.environ.get("VAPID_PUBLIC_KEY", "")
 
 
-def _rest(method, params=None, payload=None, prefer=None):
+def rest(method, table, params=None, payload=None, prefer=None):
+    """Call the Supabase REST API for one table with the server-side secret key."""
     headers = {"apikey": os.environ["SUPABASE_SECRET_KEY"], "Content-Type": "application/json"}
     if prefer:
         headers["Prefer"] = prefer
     response = requests.request(
         method,
-        f"{os.environ['SUPABASE_URL'].rstrip('/')}/rest/v1/{TABLE}",
+        f"{os.environ['SUPABASE_URL'].rstrip('/')}/rest/v1/{table}",
         params=params,
         json=payload,
         headers=headers,
@@ -51,8 +52,9 @@ def _rest(method, params=None, payload=None, prefer=None):
 
 
 def save_subscription(subscription):
-    _rest(
+    rest(
         "POST",
+        TABLE,
         params={"on_conflict": "endpoint"},
         payload={"endpoint": subscription["endpoint"], "subscription": subscription},
         prefer="resolution=merge-duplicates",
@@ -62,7 +64,7 @@ def save_subscription(subscription):
 def send_to_all(title, body, url="/"):
     """Send one notification to every saved device. Returns how many devices got it."""
     sent = 0
-    for row in _rest("GET", params={"select": "endpoint,subscription"}):
+    for row in rest("GET", TABLE, params={"select": "endpoint,subscription"}):
         try:
             webpush(
                 subscription_info=row["subscription"],
@@ -75,7 +77,7 @@ def send_to_all(title, body, url="/"):
             status = e.response.status_code if e.response is not None else None
             if status in (404, 410):
                 # The device unsubscribed or the app was removed; forget it.
-                _rest("DELETE", params={"endpoint": f"eq.{row['endpoint']}"})
+                rest("DELETE", TABLE, params={"endpoint": f"eq.{row['endpoint']}"})
             else:
                 print(f"[ERROR] push to {row['endpoint'][:40]}: {e}", file=sys.stderr)
     return sent
