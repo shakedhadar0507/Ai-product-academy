@@ -11,11 +11,8 @@ they appear, halfway to the deadline, two days before, on the day, and once afte
 not marked done on the dashboard. Every push sent is logged in uni_alerts, so nothing repeats
 (see garmin/uni_schema.sql).
 """
-import base64
-import html
 import json
 import os
-import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,7 +23,7 @@ import requests
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 
-from agents import formatting, google_auth, push_agent
+from agents import formatting, gmail_agent, google_auth, push_agent
 
 load_dotenv()
 
@@ -203,40 +200,6 @@ def set_done(key, done):
 
 # ---------- Mail ----------
 
-def _decode_part(part):
-    data = part.get("body", {}).get("data")
-    if not data:
-        return ""
-    raw = base64.urlsafe_b64decode(data)
-    charset = "utf-8"
-    for header in part.get("headers", []):
-        match = re.search(r'charset="?([\w-]+)', header["value"]) if header["name"].lower() == "content-type" else None
-        if match:
-            charset = match.group(1).lower()
-    # Uni mails use iso-8859-8-i, which Python only knows as iso-8859-8.
-    charset = {"iso-8859-8-i": "iso-8859-8", "windows-1255": "cp1255"}.get(charset, charset)
-    try:
-        return raw.decode(charset, errors="replace")
-    except LookupError:
-        return raw.decode("utf-8", errors="replace")
-
-
-def _mail_text(payload):
-    plain, rich = [], []
-    stack = [payload]
-    while stack:
-        part = stack.pop()
-        stack.extend(part.get("parts", []))
-        if part.get("mimeType") == "text/plain":
-            plain.append(_decode_part(part))
-        elif part.get("mimeType") == "text/html":
-            rich.append(_decode_part(part))
-    if plain:
-        return "\n".join(plain)
-    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", "\n".join(rich), flags=re.S | re.I)
-    return html.unescape(re.sub(r"<[^>]+>", " ", text))
-
-
 MAIL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -311,14 +274,14 @@ def _check_mail():
         try:
             verdict = classify_mail(
                 headers.get("from", ""), headers.get("subject", ""), headers.get("date", ""),
-                _mail_text(message["payload"]) or message.get("snippet", ""),
+                gmail_agent.mail_text(message["payload"]) or message.get("snippet", ""),
             )
         except Exception as e:
             # Leave it unmarked so the next run tries again.
             print(f"[ERROR] uni mail classify {message_id}: {e}", file=sys.stderr)
             continue
         processed.append(key)
-        url = f"https://mail.google.com/mail/u/0/#all/{message_id}"
+        url = f"/mail/{message_id}"
         due = _parse_mail_due(verdict["due"]) if verdict["kind"] in ("assignment", "exam") else None
         if due and due > datetime.now(timezone.utc):
             tasks.append({
@@ -448,4 +411,21 @@ def run_check():
             DASHBOARD_URL,
         )
     _mark_sent(done + [a["key"] for a in alerts])
-    return {"ok": not errors, "errors": errors, "alerts": len(alerts)}
+    return {"ok": not errors, "errors": errors, "alerts": len(alerts), "setup": setup_status()}
+
+
+def setup_status():
+    """What is configured, so a scheduled run's response shows what still needs fixing."""
+    status = {"moodle_link": is_configured()}
+    try:
+        anthropic.Anthropic().models.retrieve("claude-opus-5-5")
+        status["anthropic_key"] = "ok"
+    except anthropic.AuthenticationError:
+        status["anthropic_key"] = "invalid"
+    except Exception as e:
+        status["anthropic_key"] = f"error: {type(e).__name__}"
+    try:
+        status["push_devices"] = len(push_agent.rest("GET", push_agent.TABLE, params={"select": "endpoint"}))
+    except Exception as e:
+        status["push_devices"] = f"error: {type(e).__name__}"
+    return status
