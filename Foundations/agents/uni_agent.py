@@ -1,7 +1,7 @@
 """University alerts: Moodle deadlines (calendar export) and every mail to the uni address.
 
-Moodle: Calendar → Import or export calendars → Export → "All courses" + "Recent and next 60 days"
-→ Get calendar URL. That URL (with its personal token) goes in MOODLE_ICAL_URL.
+Moodle: moodle.runi.ac.il/<year>/calendar/export.php → "All courses" + "Recent and next 60 days"
+→ Get calendar URL. A new academic year needs a new link. That URL (with its personal token) goes in MOODLE_ICAL_URL.
 
 Mail: every forwarded mail to the uni address (newsletters included) is read once by Claude,
 which writes a short Hebrew push and pulls out a deadline when there is one.
@@ -29,7 +29,10 @@ load_dotenv()
 
 TASKS_TABLE = "uni_tasks"
 ALERTS_TABLE = "uni_alerts"
-MOODLE_URL = os.environ.get("MOODLE_URL", "https://moodle.runi.ac.il/my/")
+# Reichman runs one Moodle per academic year (moodle.runi.ac.il/2027/...), so links take
+# the year's base from the calendar export link.
+MOODLE_BASE = os.environ.get("MOODLE_ICAL_URL", "https://moodle.runi.ac.il/2027/calendar/").split("/calendar/")[0]
+MOODLE_URL = f"{MOODLE_BASE}/calendar/view.php?view=upcoming"
 DASHBOARD_URL = "/#uni"
 MAX_PUSHES_PER_RUN = 5
 MAIL_LOOKBACK_DAYS = 2
