@@ -36,6 +36,8 @@ MOODLE_URL = f"{MOODLE_BASE}/calendar/view.php?view=upcoming"
 DASHBOARD_URL = "/#uni"
 MAX_PUSHES_PER_RUN = 5
 MAIL_LOOKBACK_DAYS = 2
+# Claude reads at most this many new mails per run; the rest wait for the next run.
+MAX_MAILS_PER_RUN = 10
 MIDPOINT_MIN_LEAD = timedelta(days=5)
 OVERDUE_GRACE = timedelta(hours=2)
 OVERDUE_WINDOW = timedelta(days=3)
@@ -268,10 +270,9 @@ def _check_mail():
     sent = _already_sent([f"mail:{i}" for i in ids])
 
     alerts, processed, tasks = [], [], []
-    for message_id in reversed(ids):  # oldest first
+    pending = [i for i in reversed(ids) if f"mail:{i}" not in sent]  # oldest first
+    for message_id in pending[:MAX_MAILS_PER_RUN]:
         key = f"mail:{message_id}"
-        if key in sent:
-            continue
         message = service.users().messages().get(userId="me", id=message_id, format="full").execute()
         headers = {h["name"].lower(): h["value"] for h in message["payload"].get("headers", [])}
         try:
@@ -386,8 +387,9 @@ def run_check():
             alerts += found
             fresh.update(a["key"].split(":new")[0].split(":moved:")[0] for a in found)
         except Exception as e:
-            print(f"[ERROR] uni moodle: {e}", file=sys.stderr)
-            errors.append("moodle")
+            print(f"[ERROR] uni moodle: {type(e).__name__}", file=sys.stderr)
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            errors.append(f"moodle: {type(e).__name__}" + (f" {status}" if status else ""))
     try:
         found, processed, tasks = _check_mail()
         _save_tasks(tasks)
@@ -396,25 +398,31 @@ def run_check():
         fresh.update(t["key"] for t in tasks)
     except Exception as e:
         print(f"[ERROR] uni mail: {e}", file=sys.stderr)
-        errors.append("mail")
+        errors.append(f"mail: {type(e).__name__}")
     try:
         found, quiet = _reminders(fresh)
         alerts += found
         done += quiet
     except Exception as e:
         print(f"[ERROR] uni reminders: {e}", file=sys.stderr)
-        errors.append("reminders")
+        errors.append(f"reminders: {type(e).__name__}")
 
-    for alert in alerts[:MAX_PUSHES_PER_RUN]:
-        push_agent.send_to_all(alert["title"], alert["body"], alert["url"])
-    if len(alerts) > MAX_PUSHES_PER_RUN:
-        push_agent.send_to_all(
-            "📚 עוד עדכונים מהלימודים",
-            f"יש עוד {len(alerts) - MAX_PUSHES_PER_RUN} עדכונים. הכול בכרטיס הלימודים ב-Shaked Hub.",
-            DASHBOARD_URL,
-        )
+    # Log first, so a failed push is never repeated on the next run.
     _mark_sent(done + [a["key"] for a in alerts])
-    return {"ok": not errors, "errors": errors, "alerts": len(alerts), "setup": setup_status()}
+    pushed = 0
+    try:
+        for alert in alerts[:MAX_PUSHES_PER_RUN]:
+            pushed += push_agent.send_to_all(alert["title"], alert["body"], alert["url"])
+        if len(alerts) > MAX_PUSHES_PER_RUN:
+            push_agent.send_to_all(
+                "📚 עוד עדכונים מהלימודים",
+                f"יש עוד {len(alerts) - MAX_PUSHES_PER_RUN} עדכונים. הכול בכרטיס הלימודים ב-Shaked Hub.",
+                DASHBOARD_URL,
+            )
+    except Exception as e:
+        print(f"[ERROR] uni push: {e}", file=sys.stderr)
+        errors.append(f"push: {type(e).__name__}")
+    return {"ok": not errors, "errors": errors, "alerts": len(alerts), "pushed": pushed, "setup": setup_status()}
 
 
 def setup_status():
