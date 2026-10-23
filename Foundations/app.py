@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 from datetime import date, timedelta
 
 from dotenv import load_dotenv
@@ -831,11 +832,27 @@ def check_uni():
     expected = os.environ.get("CRON_SECRET")
     if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
         return Response("Forbidden", 403)
+    # The check reads mail with Claude and can outlast Gunicorn's 30-second request limit,
+    # so it runs in the background and the response reports the previous run.
+    with _uni_check["lock"]:
+        running = _uni_check["thread"] is not None and _uni_check["thread"].is_alive()
+        if not running:
+            _uni_check["thread"] = threading.Thread(target=_run_uni_check, daemon=True)
+            _uni_check["thread"].start()
+    return jsonify({"started": not running, "last_run": _uni_check["last"]})
+
+
+_uni_check = {"lock": threading.Lock(), "thread": None, "last": None}
+
+
+def _run_uni_check():
     try:
-        return jsonify(uni_agent.run_check())
+        result = uni_agent.run_check()
     except Exception as e:
         print(f"[ERROR] check_uni: {e}", file=sys.stderr)
-        return jsonify({"error": "Check failed"}), 500
+        result = {"ok": False, "errors": [type(e).__name__]}
+    result["finished_at"] = formatting.now_in_tz().strftime("%d/%m %H:%M")
+    _uni_check["last"] = result
 
 
 @app.route("/agent-action", methods=["POST"])
