@@ -115,10 +115,10 @@ def parse_ical(text):
 def get_upcoming(days=60):
     """Upcoming Moodle events, soonest first (cached for 5 minutes)."""
     if _events_cache["events"] is None or time.time() - _events_cache["at"] > EVENTS_CACHE_SECONDS:
-        response = requests.get(os.environ["MOODLE_ICAL_URL"], timeout=20)
+        response = requests.get(os.environ["MOODLE_ICAL_URL"].strip(), timeout=20)
         response.raise_for_status()
         if "BEGIN:VCALENDAR" not in response.text:
-            raise ValueError("Moodle did not return a calendar (the export link may have expired)")
+            raise ValueError(f"not a calendar (got {response.headers.get('Content-Type', '?')})")
         _events_cache.update(at=time.time(), events=parse_ical(response.text))
     now = datetime.now(timezone.utc)
     upcoming = [e for e in _events_cache["events"] if now <= e["due"] <= now + timedelta(days=days)]
@@ -377,8 +377,25 @@ def _reminders(fresh_keys):
 
 # ---------- Scheduled run ----------
 
+def _moodle_error(e):
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    # ValueError text is ours or a date format, never the link (which holds a token).
+    detail = f" {status}" if status else (f" {str(e)[:80]}" if isinstance(e, ValueError) else "")
+    return f"moodle: {type(e).__name__}{detail}"
+
+
 def run_check():
     alerts, done, errors = [], [], []
+    push_problem = push_agent.private_key_problem()
+    if push_problem:
+        # Nothing is read or logged until pushes can go out, so no alert is lost meanwhile.
+        errors.append(f"push: {push_problem}")
+        if is_configured():
+            try:
+                get_upcoming()
+            except Exception as e:
+                errors.append(_moodle_error(e))
+        return {"ok": False, "errors": errors, "alerts": 0, "pushed": 0, "setup": setup_status()}
     fresh = set()
     if is_configured():
         try:
@@ -388,8 +405,7 @@ def run_check():
             fresh.update(a["key"].split(":new")[0].split(":moved:")[0] for a in found)
         except Exception as e:
             print(f"[ERROR] uni moodle: {type(e).__name__}", file=sys.stderr)
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            errors.append(f"moodle: {type(e).__name__}" + (f" {status}" if status else ""))
+            errors.append(_moodle_error(e))
     try:
         found, processed, tasks = _check_mail()
         _save_tasks(tasks)
@@ -421,7 +437,7 @@ def run_check():
             )
     except Exception as e:
         print(f"[ERROR] uni push: {e}", file=sys.stderr)
-        errors.append(f"push: {type(e).__name__}")
+        errors.append(f"push: {type(e).__name__} {str(e)[:80]}")
     return {"ok": not errors, "errors": errors, "alerts": len(alerts), "pushed": pushed, "setup": setup_status()}
 
 

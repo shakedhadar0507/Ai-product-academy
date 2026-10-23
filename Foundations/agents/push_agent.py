@@ -10,6 +10,7 @@ import sys
 import requests
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
+from py_vapid import Vapid
 from pywebpush import WebPushException, webpush
 
 from agents import google_auth
@@ -30,8 +31,23 @@ def is_configured():
     )
 
 
+def _clean_key(name):
+    """Env value without stray quotes, spaces or a pasted "NAME=" prefix."""
+    value = os.environ.get(name, "").strip().strip("'\"").strip()
+    return value.removeprefix(f"{name}=").strip()
+
+
 def public_key():
-    return os.environ.get("VAPID_PUBLIC_KEY", "")
+    return _clean_key("VAPID_PUBLIC_KEY")
+
+
+def private_key_problem():
+    """None if VAPID_PRIVATE_KEY can sign pushes, else a short reason (never the key itself)."""
+    try:
+        Vapid.from_string(_clean_key("VAPID_PRIVATE_KEY"))
+        return None
+    except Exception as e:
+        return f"VAPID_PRIVATE_KEY invalid ({type(e).__name__})"
 
 
 def rest(method, table, params=None, payload=None, prefer=None):
@@ -69,7 +85,7 @@ def send_to_all(title, body, url="/"):
             webpush(
                 subscription_info=row["subscription"],
                 data=json.dumps({"title": title, "body": body, "url": url}),
-                vapid_private_key=os.environ["VAPID_PRIVATE_KEY"],
+                vapid_private_key=_clean_key("VAPID_PRIVATE_KEY"),
                 vapid_claims={"sub": "mailto:" + os.environ.get("VAPID_CONTACT", "shaked.hadar0507@gmail.com")},
             )
             sent += 1
