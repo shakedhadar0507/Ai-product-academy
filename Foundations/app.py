@@ -1,5 +1,6 @@
 import html
 import os
+import re
 import secrets
 import sys
 from datetime import date, timedelta
@@ -25,6 +26,7 @@ from agents import (
     calendar_agent,
     formatting,
     garmin_agent,
+    gmail_agent,
     google_auth,
     push_agent,
     uni_agent,
@@ -198,7 +200,7 @@ def get_email_bucket(service, query, sample_size=3):
         if not page_token:
             break
 
-    subjects = []
+    samples = []
     for message_id in message_ids[:sample_size]:
         message = service.users().messages().get(
             userId="me",
@@ -206,9 +208,9 @@ def get_email_bucket(service, query, sample_size=3):
             format="metadata",
             metadataHeaders=["Subject"],
         ).execute()
-        subjects.append(get_header(message["payload"]["headers"], "Subject"))
+        samples.append({"id": message_id, "subject": get_header(message["payload"]["headers"], "Subject")})
 
-    return len(message_ids), subjects
+    return len(message_ids), samples
 
 
 def render_card(icon, title, body_html):
@@ -232,11 +234,19 @@ def render_list(items_html):
     ) + "</ul>"
 
 
-def render_email_bucket(name, count, subjects):
+def render_link(url, text):
+    """In-app links open in place; outside links (Gmail, Calendar, Moodle) open in a new tab."""
+    target = " target='_blank' rel='noopener'" if url.startswith("http") else ""
+    return f"<a href='{html.escape(url)}'{target} class='hover:underline'>{text}</a>"
+
+
+def render_email_bucket(name, count, samples):
     if count == 0:
         body = "<p class='text-slate-400 text-sm'>No emails</p>"
     else:
-        body = render_list([f"<span class='text-sm'>{subject}</span>" for subject in subjects])
+        body = render_list([
+            f"<span class='text-sm'>{render_link('/mail/' + m['id'], html.escape(m['subject']))}</span>" for m in samples
+        ])
     return f"""
     <div>
       <p class="text-sm font-semibold text-slate-700 mb-1">{name} <span class="text-slate-400 font-normal">({count})</span></p>
@@ -328,7 +338,9 @@ def dashboard():
                 time_range = formatting.format_time_range(
                     event["start"].get("dateTime"), event["end"].get("dateTime")
                 )
-                title = event.get("summary", "(no title)")
+                title = html.escape(event.get("summary", "(no title)"))
+                if event.get("htmlLink"):
+                    title = render_link(event["htmlLink"], title)
                 items.append(f"<span class='text-slate-400'>{time_range}</span> &mdash; {title}")
             events_html = render_list(items)
         insight_html = f"""
@@ -362,8 +374,10 @@ def dashboard():
                         when = f"<span class='font-semibold text-slate-700'>{when}</span>"
                     course = f"<span class='text-slate-400'> · {html.escape(task['course'])}</span>" if task.get("course") else ""
                     title = html.escape(task["title"])
-                    if task.get("url"):
-                        title = f"<a href='{html.escape(task['url'])}' target='_blank' class='hover:underline'>{title}</a>"
+                    if task["key"].startswith("mail:"):
+                        title = render_link("/mail/" + task["key"][5:], title)
+                    elif task.get("url"):
+                        title = render_link(task["url"], title)
                     button = "בטל" if task["done"] else "✓ בוצע"
                     style = "line-through text-slate-400" if task["done"] else ""
                     items.append(
@@ -728,6 +742,77 @@ def check_uni_mail():
     except Exception as e:
         print(f"[ERROR] check_uni_mail: {e}", file=sys.stderr)
         return jsonify({"error": "Check failed"}), 500
+
+
+MAIL_PAGE = """
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{subject} · Shaked Hub</title>
+  {head}
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen p-4">
+  <main class="max-w-2xl mx-auto flex flex-col gap-4">
+    <div class="flex items-center justify-between">
+      <a href="/" class="text-sm text-indigo-600">→ חזרה לדשבורד</a>
+      <a href="{web_url}" target="_blank" rel="noopener" class="text-sm text-indigo-600">פתח ב-Gmail</a>
+    </div>
+    {notice}
+    <section class="bg-white rounded-2xl shadow-md p-5 flex flex-col gap-2">
+      <h1 class="text-lg font-semibold text-slate-800">{subject}</h1>
+      <p class="text-sm text-slate-500">{sender} · {date}</p>
+      <div dir="auto" class="mt-2 text-sm text-slate-700 whitespace-pre-wrap break-words">{text}</div>
+    </section>
+    <form method="POST" class="bg-white rounded-2xl shadow-md p-5 flex flex-col gap-3"
+          onsubmit="return event.submitter.value !== 'send' || confirm('לשלוח את התשובה ל-{reply_to_js}?');">
+      <p class="text-sm font-semibold text-slate-700">תשובה אל {reply_to}</p>
+      <textarea name="body" required rows="6" dir="auto"
+                class="border border-slate-200 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"></textarea>
+      <div class="flex gap-2">
+        <button name="action" value="send" class="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2.5 text-sm font-medium">שלח</button>
+        <button name="action" value="draft" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg px-4 py-2.5 text-sm font-medium">שמור כטיוטה</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>
+"""
+
+
+@app.route("/mail/<message_id>", methods=["GET", "POST"])
+def mail_view(message_id):
+    if not re.fullmatch(r"[0-9a-fA-F]+", message_id):
+        return Response("Not found", 404)
+    notice = ""
+    if request.method == "POST":
+        body = request.form.get("body", "").strip()
+        send = request.form.get("action") == "send"
+        try:
+            to = gmail_agent.reply(message_id, body, send=send)
+            done = "נשלחה" if send else "נשמרה כטיוטה ב-Gmail"
+            notice = f"<div class='bg-emerald-50 border-r-4 border-emerald-400 rounded-l-lg p-3 text-sm text-emerald-900'>התשובה אל {html.escape(to)} {done}.</div>"
+        except Exception as e:
+            print(f"[ERROR] mail reply: {e}", file=sys.stderr)
+            notice = "<div class='bg-rose-50 border-r-4 border-rose-400 rounded-l-lg p-3 text-sm text-rose-900'>לא הצלחתי לשלוח. נסה שוב או פתח ב-Gmail.</div>"
+    try:
+        message = gmail_agent.get_message(message_id)
+    except Exception as e:
+        print(f"[ERROR] mail view: {e}", file=sys.stderr)
+        return redirect(gmail_agent.GMAIL_WEB_URL.format(message_id))
+    return MAIL_PAGE.format(
+        head=PWA_HEAD_TAGS,
+        notice=notice,
+        subject=html.escape(message["subject"]),
+        sender=html.escape(message["from"]),
+        date=html.escape(message["date"]),
+        text=html.escape(message["text"][:20000]),
+        web_url=html.escape(message["web_url"]),
+        reply_to=html.escape(message["reply_to"]),
+        reply_to_js=html.escape(message["reply_to"]).replace("'", "").replace("\\", ""),
+    )
 
 
 @app.route("/uni/done", methods=["POST"])
