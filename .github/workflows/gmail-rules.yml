@@ -1,0 +1,27 @@
+name: Apply Gmail inbox rules
+
+# Creates the Gmail filters in Foundations/agents/gmail_rules.py (calendar invites
+# skip the inbox, blocked senders go to Trash) and cleans up mail that already
+# matches. Safe to repeat. Runs after each deploy of the rules and once a day.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Foundations/agents/gmail_rules.py"
+  schedule:
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Shaked Hub
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          # Right after a push Render is still deploying and returns 404, so keep retrying.
+          curl -fsS --retry 12 --retry-delay 60 --retry-all-errors --max-time 120 \
+            -X POST -H "X-Cron-Secret: $CRON_SECRET" \
+            https://ai-product-academy.onrender.com/tasks/gmail-rules
+          echo
