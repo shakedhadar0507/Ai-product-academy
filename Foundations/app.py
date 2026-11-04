@@ -28,6 +28,7 @@ from agents import (
     formatting,
     garmin_agent,
     gmail_agent,
+    gmail_rules,
     google_auth,
     push_agent,
     uni_agent,
@@ -50,7 +51,7 @@ app.config.update(
 # The home-screen app can't send a Basic Auth header, so login is a form that
 # sets a 30-day session cookie. The PWA files must load before login.
 # The scheduled check authenticates with CRON_SECRET instead.
-PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/tasks/check-uni-mail", "/tasks/check-uni"}
+PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/gmail-rules"}
 
 
 def credentials_valid(given_username, given_password):
@@ -853,6 +854,18 @@ def _run_uni_check():
         result = {"ok": False, "errors": [type(e).__name__]}
     result["finished_at"] = formatting.now_in_tz().strftime("%d/%m %H:%M")
     _uni_check["last"] = result
+
+
+@app.route("/tasks/gmail-rules", methods=["POST"])
+def gmail_rules_task():
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    try:
+        return jsonify({"ok": True, "rules": gmail_rules.apply_rules()})
+    except Exception as e:
+        print(f"[ERROR] gmail_rules: {e}", file=sys.stderr)
+        return jsonify({"ok": False, "error": type(e).__name__}), 500
 
 
 @app.route("/agent-action", methods=["POST"])
