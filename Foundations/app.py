@@ -51,6 +51,8 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=30),
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
+    # Static files carry a version in their link (app.css?v=2), so phones may keep them a year.
+    SEND_FILE_MAX_AGE_DEFAULT=timedelta(days=365),
 )
 
 # The home-screen app can't send a Basic Auth header, so login is a form that
@@ -105,7 +107,7 @@ def login():
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>Sign in · Shaked Hub</title>
       {PWA_HEAD_TAGS}
-      <script src="https://cdn.tailwindcss.com"></script>
+      <link rel="stylesheet" href="/static/app.css?v=2">
     </head>
     <body class="bg-slate-100 min-h-screen flex items-center justify-center p-4">
       <form method="POST" class="bg-white rounded-2xl shadow-md p-8 w-full max-w-sm flex flex-col gap-3">
@@ -151,7 +153,9 @@ def privacy():
 
 @app.route("/manifest.webmanifest")
 def manifest():
-    return send_from_directory(app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json")
+    response = send_from_directory(app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.route("/sw.js")
@@ -769,7 +773,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       } catch (e) {}
     })();
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body class="bg-slate-100 min-h-screen">
   <header class="bg-white shadow-sm sticky top-0 z-10" style="padding-top: env(safe-area-inset-top)">
@@ -1064,7 +1068,7 @@ MAIL_PAGE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{subject} · Shaked Hub</title>
   {head}
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body class="bg-slate-100 min-h-screen p-4">
   <main class="max-w-2xl mx-auto flex flex-col gap-4">
