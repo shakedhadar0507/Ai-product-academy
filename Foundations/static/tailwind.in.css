@@ -1,3 +1,6 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Hide the default disclosure triangle on collapsible rows (Safari). */
+summary::-webkit-details-marker { display: none; }
