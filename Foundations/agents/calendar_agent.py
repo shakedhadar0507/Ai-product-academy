@@ -11,7 +11,7 @@ from agents import formatting, google_auth
 
 load_dotenv()
 
-CACHE_TTL_SECONDS = 600
+CACHE_TTL_SECONDS = 1800
 
 _insight_cache = {}
 

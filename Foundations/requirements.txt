@@ -9,3 +9,4 @@ tzdata==2025.2
 gunicorn==23.0.0
 openai==1.54.4
 pywebpush==2.0.3
+garminconnect==0.3.17

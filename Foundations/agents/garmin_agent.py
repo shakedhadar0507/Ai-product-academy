@@ -41,6 +41,20 @@ def is_configured():
     return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SECRET_KEY"))
 
 
+def clear_cache():
+    _cache.clear()
+
+
+def latest_dates():
+    """Newest wellness day and newest activity in Supabase, to see how fresh the sync is."""
+    wellness = _query("garmin_daily_wellness", {"select": "date", "order": "date.desc", "limit": "1"})
+    activity = _query("garmin_activities", {"select": "start_time_local", "order": "start_time_local.desc", "limit": "1"})
+    return {
+        "wellness": wellness[0]["date"] if wellness else None,
+        "activity": activity[0]["start_time_local"] if activity else None,
+    }
+
+
 def get_planned_workout(day):
     return TRAINING_PLAN.get(day)
 

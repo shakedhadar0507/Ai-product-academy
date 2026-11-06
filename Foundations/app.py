@@ -4,7 +4,11 @@ import re
 import secrets
 import sys
 import threading
-from datetime import date, timedelta
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import (
@@ -20,6 +24,7 @@ from flask import (
     url_for,
 )
 from googleapiclient.discovery import build
+import requests
 
 from agents import (
     action_agent,
@@ -27,6 +32,7 @@ from agents import (
     calendar_agent,
     formatting,
     garmin_agent,
+    garmin_sync_agent,
     gmail_agent,
     google_auth,
     push_agent,
@@ -50,7 +56,10 @@ app.config.update(
 # The home-screen app can't send a Basic Auth header, so login is a form that
 # sets a 30-day session cookie. The PWA files must load before login.
 # The scheduled check authenticates with CRON_SECRET instead.
-PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/tasks/check-uni-mail", "/tasks/check-uni"}
+PUBLIC_PATHS = {
+    "/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/healthz",
+    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status",
+}
 
 
 def credentials_valid(given_username, given_password):
@@ -190,36 +199,36 @@ OTHER_EMAIL_QUERY = "in:inbox is:unread category:primary -label:לימודים -
 
 
 def get_email_bucket(service, query, sample_size=3):
-    message_ids = []
-    page_token = None
-    while True:
-        response = service.users().messages().list(
-            userId="me", q=query, pageToken=page_token, maxResults=500
-        ).execute()
-        message_ids.extend(message["id"] for message in response.get("messages", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
+    """(count, newest few) for a Gmail search. Gmail's estimate is used for the count, so a
+    big label costs one call instead of paging through every message."""
+    response = service.users().messages().list(userId="me", q=query, maxResults=sample_size).execute()
+    messages = response.get("messages", [])
+    count = response.get("resultSizeEstimate", len(messages)) if messages else 0
     samples = []
-    for message_id in message_ids[:sample_size]:
-        message = service.users().messages().get(
-            userId="me",
-            id=message_id,
-            format="metadata",
-            metadataHeaders=["Subject"],
+    for message in messages:
+        detail = service.users().messages().get(
+            userId="me", id=message["id"], format="metadata", metadataHeaders=["Subject"]
         ).execute()
-        samples.append({"id": message_id, "subject": get_header(message["payload"]["headers"], "Subject")})
+        samples.append({"id": message["id"], "subject": get_header(detail["payload"]["headers"], "Subject")})
+    return max(count, len(samples)), samples
 
-    return len(message_ids), samples
 
-
-def render_card(icon, title, body_html):
+def render_card(icon, title, body_html, link=None, link_text=None, name=None):
+    """A dashboard card. `link` adds a tappable button in the header (Gmail, Calendar...)."""
+    header_link = (
+        f"<a href='{html.escape(link)}' target='_blank' rel='noopener' "
+        f"class='text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-full px-3 py-1'>{link_text}</a>"
+        if link else ""
+    )
+    data_name = f" data-card='{name}'" if name else ""
     return f"""
-    <section class="bg-white rounded-2xl shadow-md hover:shadow-lg transition-shadow duration-300 p-6 flex flex-col gap-4">
-      <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
-        <span class="text-2xl">{icon}</span> {title}
-      </h2>
+    <section{data_name} class="bg-white rounded-2xl shadow-md p-5 flex flex-col gap-3">
+      <div class="flex items-center justify-between gap-2">
+        <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
+          <span class="text-2xl">{icon}</span> {title}
+        </h2>
+        {header_link}
+      </div>
       <div class="text-slate-600">{body_html}</div>
     </section>
     """
@@ -238,33 +247,48 @@ def render_list(items_html):
 def render_link(url, text):
     """In-app links open in place; outside links (Gmail, Calendar, Moodle) open in a new tab."""
     target = " target='_blank' rel='noopener'" if url.startswith("http") else ""
-    return f"<a href='{html.escape(url)}'{target} class='hover:underline'>{text}</a>"
+    return f"<a href='{html.escape(url)}'{target} class='text-indigo-700 hover:underline'>{text}</a>"
 
 
-def render_email_bucket(name, count, samples):
+GMAIL_URL = "https://mail.google.com/mail/u/0/#inbox"
+GMAIL_SEARCH_URL = "https://mail.google.com/mail/u/0/#search/{}"
+CALENDAR_URL = "https://calendar.google.com/calendar/r/day"
+NEW_EVENT_URL = "https://calendar.google.com/calendar/r/eventedit"
+GARMIN_URL = "https://connect.garmin.com/modern/"
+
+
+def render_email_bucket(name, query, count, samples):
+    title = render_link(GMAIL_SEARCH_URL.format(quote(query)), html.escape(name))
     if count == 0:
-        body = "<p class='text-slate-400 text-sm'>No emails</p>"
+        body = "<p class='text-slate-400 text-sm'>אין מיילים</p>"
     else:
-        body = render_list([
-            f"<span class='text-sm'>{render_link('/mail/' + m['id'], html.escape(m['subject']))}</span>" for m in samples
-        ])
+        rows = []
+        for m in samples:
+            rows.append(
+                f"<div class='flex items-start justify-between gap-2' data-mail='{m['id']}'>"
+                f"<span class='text-sm'>{render_link('/mail/' + m['id'], html.escape(m['subject']))}</span>"
+                f"<span class='shrink-0 flex gap-1'>"
+                f"<button data-mail-action='read' data-id='{m['id']}' class='text-xs rounded-lg px-2 py-1 bg-slate-100 hover:bg-indigo-100'>נקרא</button>"
+                f"<button data-mail-action='archive' data-id='{m['id']}' class='text-xs rounded-lg px-2 py-1 bg-slate-100 hover:bg-indigo-100'>ארכב</button>"
+                f"</span></div>"
+            )
+        body = render_list(rows)
     return f"""
     <div>
-      <p class="text-sm font-semibold text-slate-700 mb-1">{name} <span class="text-slate-400 font-normal">({count})</span></p>
+      <p class="text-sm font-semibold text-slate-700 mb-1">{title} <span class="text-slate-400 font-normal">({count})</span></p>
       {body}
     </div>
     """
 
 
-@app.route("/")
-def dashboard():
-    cards = []
-    tz_name = formatting.resolve_tz_name(request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME))
+# ---------- cards ----------
+# Each card is built on its own (in parallel) and kept in a server cache, so the page opens
+# at once with the last version and swaps in fresh cards a few seconds later.
 
-    weather_result = None
+def card_weather(tz_name, data):
     try:
         conditions = weather_agent.get_running_conditions(LATITUDE, LONGITUDE)
-        weather_result = weather_agent.get_current_weather(LATITUDE, LONGITUDE)
+        data["weather"] = weather_agent.get_current_weather(LATITUDE, LONGITUDE)
         advice = weather_agent.recommend_run(
             conditions, garmin_agent.get_planned_workout(formatting.today_in_tz(tz_name))
         )
@@ -299,8 +323,10 @@ def dashboard():
     except Exception as e:
         print(f"[ERROR] weather: {e}", file=sys.stderr)
         body = render_error("Could not fetch weather")
-    cards.append(render_card("🌤️", "Run Weather · Tel Aviv", body))
+    return render_card("🌤️", "Run Weather · Tel Aviv", body, name="weather")
 
+
+def card_countdown(tz_name, data):
     days_remaining = (MARATHON_DATE - formatting.today_in_tz(tz_name)).days
     if days_remaining > 0:
         countdown_html = (
@@ -310,29 +336,21 @@ def dashboard():
     elif days_remaining == 0:
         countdown_html = "<span class='text-lg font-semibold text-indigo-600'>Race day is today! 🎉</span>"
     else:
-        countdown_html = "<p class='text-slate-400'>The marathon has passed.</p>"
+        return ""  # the race is over; the card comes back when a new race date is set
     body = (
         f"<div class='flex flex-col gap-1'>{countdown_html}"
         f"<p class='text-sm text-slate-400'>NYC Marathon &mdash; {MARATHON_DATE.strftime('%d/%m/%Y')}</p></div>"
     )
-    cards.append(render_card("🏁", "Marathon Countdown", body))
+    return render_card("🏁", "Marathon Countdown", body, name="countdown")
 
-    if push_agent.is_configured():
-        body = (
-            "<p id='push-status' class='text-sm text-slate-500'>Get an alert on this device when something needs you.</p>"
-            "<button id='push-button' data-key='" + push_agent.public_key() + "' "
-            "class='mt-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium'>"
-            "Enable notifications</button>"
-        )
-        cards.append(render_card("🔔", "Notifications", body))
 
-    calendar_result = None
+def card_calendar(tz_name, data):
     try:
         events = calendar_agent.get_data(tz_name)
-        calendar_result = events
+        data["calendar"] = events
         insight = calendar_agent.get_insight(events, tz_name)
         if not events:
-            events_html = "<p class='text-slate-400'>No events found for today.</p>"
+            events_html = "<p class='text-slate-400'>אין אירועים היום.</p>"
         else:
             items = []
             for event in events:
@@ -349,149 +367,115 @@ def dashboard():
           <p class="text-xs uppercase tracking-wide text-indigo-500 font-semibold mb-1">AI Insight</p>
           <p class="text-indigo-900 text-sm">{insight}</p>
         </div>
+        <a href="{NEW_EVENT_URL}" target="_blank" rel="noopener"
+           class="mt-3 inline-block text-sm text-indigo-600 font-medium">＋ אירוע חדש</a>
         """
         body = events_html + insight_html
     except Exception as e:
         print(f"[ERROR] calendar: {e}", file=sys.stderr)
-        body = render_error("Could not fetch calendar events")
-    cards.append(render_card("📅", "Today's Calendar", body))
+        body = render_error("Could not fetch calendar events") + (
+            f"<p class='text-sm mt-2'>{render_link(CALENDAR_URL, 'פתח את Google Calendar')}</p>"
+        )
+    return render_card("📅", "Today's Calendar", body, CALENDAR_URL, "פתח יומן", name="calendar")
 
-    if uni_agent.tasks_configured():
-        try:
-            tasks = uni_agent.list_tasks()
-            now = formatting.now_in_tz(tz_name)
-            open_tasks = [t for t in tasks if not t["done"]]
-            done_tasks = [t for t in tasks if t["done"]]
-            if not tasks:
-                body = "<p class='text-slate-400'>אין מטלות פתוחות.</p>"
-            else:
-                items = []
-                for task in open_tasks + done_tasks:
-                    overdue = not task["done"] and task["due"] and task["due"] < now
-                    when = uni_agent.format_due(task["due"]) if task["due"] else ""
-                    if overdue:
-                        when = f"<span class='text-rose-600 font-semibold'>לא בוצע · {when}</span>"
-                    else:
-                        when = f"<span class='font-semibold text-slate-700'>{when}</span>"
-                    course = f"<span class='text-slate-400'> · {html.escape(task['course'])}</span>" if task.get("course") else ""
-                    title = html.escape(task["title"])
-                    if task["key"].startswith("mail:"):
-                        title = render_link("/mail/" + task["key"][5:], title)
-                    elif task.get("url"):
-                        title = render_link(task["url"], title)
-                    button = "בטל" if task["done"] else "✓ בוצע"
-                    style = "line-through text-slate-400" if task["done"] else ""
-                    items.append(
-                        f"<div class='flex items-start justify-between gap-2'>"
-                        f"<div class='{style}'>{when} &mdash; {title}{course}</div>"
-                        f"<form method='POST' action='/uni/done'>"
-                        f"<input type='hidden' name='key' value='{html.escape(task['key'])}'>"
-                        f"<input type='hidden' name='done' value='{'0' if task['done'] else '1'}'>"
-                        f"<button class='shrink-0 text-xs rounded-lg px-2 py-1 bg-slate-100 hover:bg-emerald-100'>{button}</button>"
-                        f"</form></div>"
-                    )
-                body = f"<div id='uni' dir='rtl'>{render_list(items)}</div>"
-        except Exception as e:
-            print(f"[ERROR] uni card: {e}", file=sys.stderr)
-            body = render_error("Could not fetch university tasks")
-        cards.append(render_card("📚", "University tasks", body))
 
-    email_result = None
+def card_uni(tz_name, data):
+    if not uni_agent.tasks_configured():
+        return ""
+    try:
+        tasks = uni_agent.list_tasks()
+        now = formatting.now_in_tz(tz_name)
+        open_tasks = [t for t in tasks if not t["done"]]
+        done_tasks = [t for t in tasks if t["done"]]
+        if not tasks:
+            body = "<p class='text-slate-400'>אין מטלות פתוחות.</p>"
+        else:
+            items = []
+            for task in open_tasks + done_tasks:
+                overdue = not task["done"] and task["due"] and task["due"] < now
+                when = uni_agent.format_due(task["due"]) if task["due"] else ""
+                if overdue:
+                    when = f"<span class='text-rose-600 font-semibold'>לא בוצע · {when}</span>"
+                else:
+                    when = f"<span class='font-semibold text-slate-700'>{when}</span>"
+                course = f"<span class='text-slate-400'> · {html.escape(task['course'])}</span>" if task.get("course") else ""
+                title = html.escape(task["title"])
+                if task["key"].startswith("mail:"):
+                    title = render_link("/mail/" + task["key"][5:], title)
+                elif task.get("url"):
+                    title = render_link(task["url"], title)
+                button = "בטל" if task["done"] else "✓ בוצע"
+                style = "line-through text-slate-400" if task["done"] else ""
+                items.append(
+                    f"<div class='flex items-start justify-between gap-2'>"
+                    f"<div class='{style}'>{when} &mdash; {title}{course}</div>"
+                    f"<button data-task='{html.escape(task['key'])}' data-done='{'0' if task['done'] else '1'}' "
+                    f"class='shrink-0 text-xs rounded-lg px-2 py-1 bg-slate-100 hover:bg-emerald-100'>{button}</button>"
+                    f"</div>"
+                )
+            body = f"<div id='uni' dir='rtl'>{render_list(items)}</div>"
+    except Exception as e:
+        print(f"[ERROR] uni card: {e}", file=sys.stderr)
+        body = render_error("Could not fetch university tasks")
+    return render_card("📚", "University tasks", body, uni_agent.MOODLE_URL, "Moodle", name="uni")
+
+
+def card_inbox(tz_name, data):
     try:
         creds = google_auth.get_credentials(google_auth.SCOPES)
         service = build("gmail", "v1", credentials=creds)
-
-        bucket_data = []
-        sections = []
-        for label_name, query in EMAIL_LABEL_BUCKETS:
+        bucket_data, sections = [], []
+        for label_name, query in EMAIL_LABEL_BUCKETS + [("Everything Else", OTHER_EMAIL_QUERY)]:
             count, subjects = get_email_bucket(service, query)
             bucket_data.append((label_name, count, subjects))
-            sections.append(render_email_bucket(label_name, count, subjects))
-
-        other_count, other_subjects = get_email_bucket(service, OTHER_EMAIL_QUERY)
-        bucket_data.append(("Everything Else", other_count, other_subjects))
-        sections.append(render_email_bucket("Everything Else", other_count, other_subjects))
-
-        email_result = bucket_data
-        body = "<div class='flex flex-col gap-4'>" + "".join(sections) + "</div>"
+            sections.append(render_email_bucket(label_name, query, count, subjects))
+        data["email"] = bucket_data
+        body = "<div dir='rtl' class='flex flex-col gap-4'>" + "".join(sections) + "</div>"
     except Exception as e:
         print(f"[ERROR] inbox: {e}", file=sys.stderr)
-        body = render_error("Could not fetch emails")
-    cards.append(render_card("📧", "Inbox Overview", body))
+        body = render_error("Could not fetch emails") + (
+            f"<p class='text-sm mt-2'>{render_link(GMAIL_URL, 'פתח את Gmail')}</p>"
+        )
+    return render_card("📧", "Inbox", body, GMAIL_URL, "פתח Gmail", name="inbox")
 
-    training_result = None
-    garmin_data = None
-    if garmin_agent.is_configured():
-        try:
-            garmin_data = garmin_agent.get_data(formatting.today_in_tz(tz_name))
-            training_result = garmin_agent.as_training_log(garmin_data["runs"])
-        except Exception as e:
-            print(f"[ERROR] garmin: {e}", file=sys.stderr)
 
-    try:
-        brief = brief_agent.get_insight(calendar_result, weather_result, email_result, training_result, tz_name)
-        brief_body = f"<p class='text-lg leading-relaxed'>{brief}</p>"
-    except Exception as e:
-        print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
-        brief_body = "<p class='text-lg text-indigo-100 italic'>Could not generate daily brief</p>"
-
-    action_messages = get_flashed_messages()
-    action_result_html = (
-        f"<div class='bg-emerald-50 border-l-4 border-emerald-400 rounded-r-lg p-3 text-sm text-emerald-900'>{action_messages[0]}</div>"
-        if action_messages else ""
+def _sync_line():
+    """When Garmin data last synced from the server, and the sync-now button."""
+    state = garmin_sync_agent.status()
+    if not garmin_sync_agent.is_configured():
+        note = "סנכרון מהשרת עוד לא מחובר"
+    elif state["running"]:
+        note = "מסנכרן עכשיו…"
+    elif state["last"]:
+        last = state["last"]
+        note = f"סונכרן {last['finished_at']}" if last.get("ok") else f"סנכרון נכשל {last['finished_at']}"
+    else:
+        note = "מחכה לסנכרון ראשון"
+    button = (
+        "<button id='garmin-sync' class='text-xs rounded-lg px-2 py-1 bg-slate-100 hover:bg-indigo-100'>↻ סנכרן עכשיו</button>"
+        if garmin_sync_agent.is_configured() else ""
+    )
+    return (
+        f"<div dir='rtl' class='flex items-center justify-between gap-2 mt-3'>"
+        f"<p id='garmin-sync-note' class='text-xs text-slate-400'>{note}</p>{button}</div>"
     )
 
-    voice_configured = voice_agent.is_configured()
-    if voice_configured:
-        mic_disabled_attr = ""
-        mic_title = "Record a voice request"
-        mic_extra_class = "bg-slate-100 hover:bg-indigo-100 text-slate-600 hover:text-indigo-600 cursor-pointer"
-    else:
-        mic_disabled_attr = "disabled"
-        mic_title = "Voice input not configured yet"
-        mic_extra_class = "bg-slate-50 text-slate-300 cursor-not-allowed"
 
-    cards.insert(0, f"""
-    <section class="md:col-span-2 lg:col-span-3 bg-white rounded-2xl shadow-md hover:shadow-lg transition-shadow duration-300 p-6 flex flex-col gap-4">
-      <div>
-        <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
-          <span class="text-2xl">🤖</span> What should I do?
-        </h2>
-        <p class="text-sm text-slate-400 mt-0.5">Type or speak a request — schedule events, draft emails, and more.</p>
-      </div>
-      {action_result_html}
-      <form method="POST" action="/agent-action" class="flex flex-col sm:flex-row gap-2">
-        <input type="text" name="user_text" id="agent-text-input" required
-               placeholder="e.g. schedule a dentist appointment tomorrow 15:00-16:00"
-               class="flex-1 border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 transition-shadow">
-        <div class="flex gap-2">
-          <button type="button" id="mic-button" {mic_disabled_attr} title="{mic_title}"
-                  class="w-11 h-11 shrink-0 flex items-center justify-center rounded-full text-lg transition-all duration-200 active:scale-90 {mic_extra_class}">
-            🎤
-          </button>
-          <button type="submit"
-                  class="flex-1 sm:flex-none bg-indigo-500 hover:bg-indigo-600 active:scale-95 text-white rounded-lg px-5 py-2.5 text-sm font-medium transition-all duration-150 shadow-sm hover:shadow">
-            Send
-          </button>
-        </div>
-      </form>
-    </section>
-    """)
-    cards.insert(0, f"""
-    <section class="md:col-span-2 lg:col-span-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl shadow-lg hover:shadow-xl transition-shadow duration-300 p-8 flex flex-col gap-3">
-      <h2 class="flex items-center gap-2 text-xl font-bold">
-        <span class="text-3xl">🧭</span> Daily Brief
-      </h2>
-      {brief_body}
-    </section>
-    """)
-
+def card_training(tz_name, data):
     today_local = formatting.today_in_tz(tz_name)
     planned = garmin_agent.get_planned_workout(today_local)
     plan_html = (
         f"<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-1'>Today's plan</p>"
         f"<p dir='rtl' class='text-slate-800 font-medium'>{planned or 'אין אימון מתוכנן'}</p>"
     )
+    garmin_data = None
+    if garmin_agent.is_configured():
+        try:
+            garmin_data = garmin_agent.get_data(today_local)
+            data["training"] = garmin_agent.as_training_log(garmin_data["runs"])
+        except Exception as e:
+            print(f"[ERROR] garmin: {e}", file=sys.stderr)
+    data["garmin"] = garmin_data
     if garmin_data is None:
         garmin_html = render_error(
             "Garmin data not connected yet" if not garmin_agent.is_configured() else "Could not fetch Garmin data"
@@ -524,197 +508,524 @@ def dashboard():
             f"<div class='grid grid-cols-3 gap-2 mt-3'>{stats_html}</div>"
             f"<p class='text-xs text-slate-400 mt-2'>{caption}</p>"
         )
-    body = plan_html + garmin_html
+    body = plan_html + garmin_html + _sync_line()
+    return render_card("🏃", "Today's Training", body, GARMIN_URL, "Garmin", name="training")
 
-    cards.append(render_card("🏃", "Today's Training", body))
 
-    if garmin_data is not None:
-        weeks = garmin_data["weekly_km"]
-        max_km = max([km for _, km in weeks] + [1])
-        bars = "".join(
-            f"<div class='flex items-center gap-2 text-sm'>"
-            f"<span class='w-12 text-slate-400'>{week_start.strftime('%d/%m')}</span>"
-            f"<div class='flex-1 bg-slate-100 rounded h-3'>"
-            f"<div class='bg-indigo-400 h-3 rounded' style='width:{km / max_km * 100:.0f}%'></div></div>"
-            f"<span class='w-14 text-right font-medium text-slate-700'>{km} km</span></div>"
-            for week_start, km in weeks
+def card_volume(tz_name, data):
+    garmin_data = data.get("garmin")
+    if garmin_data is None:
+        return ""
+    weeks = garmin_data["weekly_km"]
+    max_km = max([km for _, km in weeks] + [1])
+    bars = "".join(
+        f"<div class='flex items-center gap-2 text-sm'>"
+        f"<span class='w-12 text-slate-400'>{week_start.strftime('%d/%m')}</span>"
+        f"<div class='flex-1 bg-slate-100 rounded h-3'>"
+        f"<div class='bg-indigo-400 h-3 rounded' style='width:{km / max_km * 100:.0f}%'></div></div>"
+        f"<span class='w-14 text-right font-medium text-slate-700'>{km} km</span></div>"
+        for week_start, km in weeks
+    )
+    runs = garmin_data["runs"]
+    if runs:
+        last = runs[0]
+        hr_html = f" &middot; HR {last['avg_hr']:.0f}" if last.get("avg_hr") else ""
+        last_html = (
+            f"<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-1 mt-4'>Last run</p>"
+            f"<p class='text-sm'><span class='text-slate-400'>{formatting.format_date(last['start_time_local'][:10])}</span> &mdash; "
+            f"<span class='font-medium text-slate-800'>{(last['distance_m'] or 0) / 1000:.1f} km</span> "
+            f"&middot; {garmin_agent.format_pace(last['avg_pace_s_per_km'])}/km{hr_html}</p>"
         )
-        runs = garmin_data["runs"]
-        if runs:
-            last = runs[0]
-            hr_html = f" &middot; HR {last['avg_hr']:.0f}" if last.get("avg_hr") else ""
-            last_html = (
-                f"<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-1 mt-4'>Last run</p>"
-                f"<p class='text-sm'><span class='text-slate-400'>{formatting.format_date(last['start_time_local'][:10])}</span> &mdash; "
-                f"<span class='font-medium text-slate-800'>{(last['distance_m'] or 0) / 1000:.1f} km</span> "
-                f"&middot; {garmin_agent.format_pace(last['avg_pace_s_per_km'])}/km{hr_html}</p>"
-            )
-        else:
-            last_html = "<p class='text-slate-400 text-sm mt-4'>No runs in the last 5 weeks.</p>"
-        body = (
-            "<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-2'>Weekly distance</p>"
-            f"<div class='flex flex-col gap-1.5'>{bars}</div>{last_html}"
+    else:
+        last_html = "<p class='text-slate-400 text-sm mt-4'>No runs in the last 5 weeks.</p>"
+    body = (
+        "<p class='text-xs uppercase tracking-wide text-slate-400 font-semibold mb-2'>Weekly distance</p>"
+        f"<div class='flex flex-col gap-1.5'>{bars}</div>{last_html}"
+    )
+    return render_card("📈", "Running Volume", body, GARMIN_URL, "Garmin", name="volume")
+
+
+def card_brief(tz_name, data):
+    try:
+        brief = brief_agent.get_insight(
+            data.get("calendar"), data.get("weather"), data.get("email"), data.get("training"), tz_name
         )
-        cards.append(render_card("📈", "Running Volume", body))
+        brief_body = f"<p class='text-lg leading-relaxed'>{brief}</p>"
+    except Exception as e:
+        print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
+        brief_body = "<p class='text-lg text-indigo-100 italic'>Could not generate daily brief</p>"
+    return f"""
+    <section data-card="brief" class="md:col-span-2 lg:col-span-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-2xl shadow-lg p-6 flex flex-col gap-3">
+      <h2 class="flex items-center gap-2 text-xl font-bold"><span class="text-3xl">🧭</span> Daily Brief</h2>
+      {brief_body}
+    </section>
+    """
+
+
+# Page order. The brief needs the other cards' data, so it is built last.
+CARD_ORDER = ["brief", "weather", "countdown", "calendar", "uni", "inbox", "training", "volume"]
+PARALLEL_CARDS = {
+    "weather": card_weather, "countdown": card_countdown, "calendar": card_calendar,
+    "uni": card_uni, "inbox": card_inbox, "training": card_training,
+}
+CARDS_FRESH_SECONDS = 120
+_cards = {"lock": threading.Lock(), "by_tz": {}, "building": set()}
+_pool = ThreadPoolExecutor(max_workers=8)
+
+
+def build_cards(tz_name):
+    data = {}
+    futures = {name: _pool.submit(fn, tz_name, data) for name, fn in PARALLEL_CARDS.items()}
+    cards = {}
+    for name, future in futures.items():
+        try:
+            cards[name] = future.result(timeout=45)
+        except Exception as e:
+            print(f"[ERROR] card {name}: {type(e).__name__}", file=sys.stderr)
+            cards[name] = ""
+    cards["volume"] = card_volume(tz_name, data)
+    cards["brief"] = card_brief(tz_name, data)
+    entry = {"at": time.time(), "cards": cards}
+    with _cards["lock"]:
+        _cards["by_tz"][tz_name] = entry
+    return entry
+
+
+def cached_cards(tz_name):
+    with _cards["lock"]:
+        return _cards["by_tz"].get(tz_name)
+
+
+def refresh_cards_async(tz_name):
+    with _cards["lock"]:
+        if tz_name in _cards["building"]:
+            return
+        _cards["building"].add(tz_name)
+
+    def work():
+        try:
+            build_cards(tz_name)
+        finally:
+            with _cards["lock"]:
+                _cards["building"].discard(tz_name)
+
+    _pool.submit(work)
+
+
+def invalidate_cards():
+    with _cards["lock"]:
+        for entry in _cards["by_tz"].values():
+            entry["at"] = 0
+
+
+def cards_html(entry):
+    return "".join(entry["cards"].get(name, "") for name in CARD_ORDER)
+
+
+def _tz():
+    return formatting.resolve_tz_name(request.cookies.get(USER_TZ_COOKIE, formatting.DEFAULT_TZ_NAME))
+
+
+@app.route("/api/cards")
+def api_cards():
+    """Fresh cards as HTML. ?wait=1 builds them now when the cache is old (used right after open)."""
+    tz_name = _tz()
+    entry = cached_cards(tz_name)
+    if entry is None or (request.args.get("wait") and time.time() - entry["at"] > CARDS_FRESH_SECONDS):
+        entry = build_cards(tz_name)
+    return jsonify({"html": cards_html(entry), "at": entry["at"], "updated": _updated_text(entry["at"], tz_name)})
+
+
+def _updated_text(timestamp, tz_name):
+    return datetime.fromtimestamp(timestamp, ZoneInfo(tz_name)).strftime("%H:%M")
+
+
+QUICK_LINKS = [
+    ("📅", "יומן", CALENDAR_URL),
+    ("＋", "אירוע", NEW_EVENT_URL),
+    ("✉️", "Gmail", GMAIL_URL),
+    ("📚", "Moodle", None),
+    ("⌚", "Garmin", GARMIN_URL),
+]
+
+
+@app.route("/")
+def dashboard():
+    tz_name = _tz()
+    entry = cached_cards(tz_name)
+    if entry is None:
+        cards_block = (
+            "<section class='md:col-span-2 lg:col-span-3 bg-white rounded-2xl shadow-md p-6 text-slate-400 text-sm'>"
+            "טוען נתונים…</section>"
+        )
+        stale = True
+        updated = ""
+    else:
+        cards_block = cards_html(entry)
+        stale = time.time() - entry["at"] > CARDS_FRESH_SECONDS
+        updated = _updated_text(entry["at"], tz_name)
+    have_cache = "1" if entry else "0"
+
+    action_messages = get_flashed_messages()
+    action_result_html = (
+        f"<div class='bg-emerald-50 border-l-4 border-emerald-400 rounded-r-lg p-3 text-sm text-emerald-900'>{action_messages[0]}</div>"
+        if action_messages else ""
+    )
+
+    voice_configured = voice_agent.is_configured()
+    if voice_configured:
+        mic_disabled_attr = ""
+        mic_title = "Record a voice request"
+        mic_extra_class = "bg-slate-100 hover:bg-indigo-100 text-slate-600 hover:text-indigo-600 cursor-pointer"
+    else:
+        mic_disabled_attr = "disabled"
+        mic_title = "Voice input not configured yet"
+        mic_extra_class = "bg-slate-50 text-slate-300 cursor-not-allowed"
+
+    quick_links = "".join(
+        f"<a href='{html.escape(url or uni_agent.MOODLE_URL)}' target='_blank' rel='noopener' "
+        f"class='flex flex-col items-center gap-1 bg-white rounded-2xl shadow-sm py-3 active:scale-95 transition-transform'>"
+        f"<span class='text-2xl'>{icon}</span><span class='text-xs text-slate-600'>{label}</span></a>"
+        for icon, label, url in QUICK_LINKS
+    )
+
+    push_card = ""
+    if push_agent.is_configured():
+        try:
+            key = push_agent.public_key()
+            push_card = render_card("🔔", "Notifications", (
+                "<p id='push-status' class='text-sm text-slate-500'>Get an alert on this device when something needs you.</p>"
+                f"<button id='push-button' data-key='{key}' "
+                "class='mt-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg px-4 py-2 text-sm font-medium'>"
+                "Enable notifications</button>"
+            ))
+        except Exception as e:
+            print(f"[ERROR] push key: {type(e).__name__}", file=sys.stderr)
+
+    action_card = f"""
+    <section class="md:col-span-2 lg:col-span-3 bg-white rounded-2xl shadow-md p-5 flex flex-col gap-3">
+      <div>
+        <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-800">
+          <span class="text-2xl">🤖</span> What should I do?
+        </h2>
+        <p class="text-sm text-slate-400 mt-0.5">Type or speak a request — schedule events, draft emails, and more.</p>
+      </div>
+      {action_result_html}
+      <form method="POST" action="/agent-action" class="flex flex-col sm:flex-row gap-2">
+        <input type="text" name="user_text" id="agent-text-input" required
+               placeholder="e.g. schedule a dentist appointment tomorrow 15:00-16:00"
+               class="flex-1 border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <div class="flex gap-2">
+          <button type="button" id="mic-button" {mic_disabled_attr} title="{mic_title}"
+                  class="w-11 h-11 shrink-0 flex items-center justify-center rounded-full text-lg transition-all duration-200 active:scale-90 {mic_extra_class}">
+            🎤
+          </button>
+          <button type="submit"
+                  class="flex-1 sm:flex-none bg-indigo-500 hover:bg-indigo-600 active:scale-95 text-white rounded-lg px-5 py-2.5 text-sm font-medium">
+            Send
+          </button>
+        </div>
+      </form>
+    </section>
+    """
 
     now_local = formatting.now_in_tz(tz_name)
     header_subtitle = f"{now_local.strftime('%A, %B')} {now_local.day}, {now_local.year}"
 
-    return f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Personal Dashboard</title>
-      {PWA_HEAD_TAGS}
-      <script>
-        (function() {{
-          try {{
-            // IANA zone names only ever contain letters, digits, '/', '_', '+', '-' —
-            // all valid unencoded in a cookie value — so this is intentionally stored
-            // raw, not percent-encoded, and must be read back raw (no decodeURIComponent)
-            // for the comparison below to actually match and to match what the server reads.
-            var detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            var match = document.cookie.match(/(?:^|;\\s*)user_tz=([^;]*)/);
-            var current = match ? match[1] : null;
-            if (detected && detected !== current) {{
-              document.cookie = "user_tz=" + detected + ";path=/;max-age=31536000;SameSite=Lax";
-              location.reload();
-            }}
-          }} catch (e) {{}}
-        }})();
-      </script>
-      <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-slate-100 min-h-screen">
-      <header class="bg-white shadow-sm">
-        <div class="max-w-6xl mx-auto px-6 py-5 flex items-start justify-between gap-4">
-          <div>
-            <h1 class="text-2xl font-bold text-slate-800">📊 Personal Dashboard</h1>
-            <p class="text-sm text-slate-400 mt-0.5">{header_subtitle}</p>
-          </div>
-          <a href="/logout" class="text-sm text-slate-400 hover:text-slate-600">Sign out</a>
-        </div>
-      </header>
-      <main class="max-w-6xl mx-auto px-6 py-8">
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {"".join(cards)}
-        </div>
-      </main>
-      <script>
-        (function() {{
-          var button = document.getElementById('push-button');
-          var status = document.getElementById('push-status');
-          if (!button) return;
-          if (!('serviceWorker' in navigator) || !('PushManager' in window)) {{
-            status.textContent = 'On iPhone, open Shaked Hub from the home screen to enable notifications.';
-            button.remove();
-            return;
-          }}
-          function toBytes(base64) {{
-            var padded = (base64 + '='.repeat((4 - base64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
-            return Uint8Array.from(atob(padded), function(c) {{ return c.charCodeAt(0); }});
-          }}
-          navigator.serviceWorker.ready.then(function(reg) {{
-            return reg.pushManager.getSubscription();
-          }}).then(function(existing) {{
-            if (existing && Notification.permission === 'granted') {{
-              status.textContent = 'Notifications are on for this device ✅';
-              button.textContent = 'Send a test notification';
-            }}
-          }});
-          button.addEventListener('click', function() {{
-            button.disabled = true;
-            Notification.requestPermission().then(function(permission) {{
-              if (permission !== 'granted') throw new Error('denied');
-              return navigator.serviceWorker.ready;
-            }}).then(function(reg) {{
-              // Start from a fresh subscription so a changed server key never leaves a stale one behind.
-              return reg.pushManager.getSubscription().then(function(existing) {{
-                return existing ? existing.unsubscribe() : null;
-              }}).then(function() {{
-                return reg.pushManager.subscribe({{ userVisibleOnly: true, applicationServerKey: toBytes(button.dataset.key) }});
-              }});
-            }}).then(function(subscription) {{
-              return fetch('/push/subscribe', {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify(subscription)
-              }});
-            }}).then(function(r) {{
-              if (!r.ok) throw new Error('save failed');
-              status.textContent = 'Notifications are on for this device ✅';
-              button.textContent = 'Send a test notification';
-              button.disabled = false;
-            }}).catch(function(e) {{
-              status.textContent = e.message === 'denied'
-                ? 'Notifications are blocked. Allow them in Settings > Notifications > Shaked Hub.'
-                : 'Could not enable notifications. Try again.';
-              button.disabled = false;
-            }});
-          }});
-        }})();
-      </script>
-      <script>
-        (function() {{
-          var micButton = document.getElementById('mic-button');
-          var textInput = document.getElementById('agent-text-input');
-          if (!micButton || micButton.disabled || !textInput) return;
+    page = DASHBOARD_PAGE
+    for marker, value in {
+        "{{HEAD}}": PWA_HEAD_TAGS,
+        "{{SUBTITLE}}": header_subtitle,
+        "{{UPDATED}}": updated,
+        "{{QUICK_LINKS}}": quick_links,
+        "{{ACTION_CARD}}": action_card,
+        "{{CARDS}}": cards_block,
+        "{{PUSH_CARD}}": push_card,
+        "{{STALE}}": "1" if stale else "0",
+        "{{HAVE_CACHE}}": have_cache,
+    }.items():
+        page = page.replace(marker, value)
+    return page
 
-          var mediaRecorder = null;
-          var chunks = [];
-          var recording = false;
-          var idleClasses = ['bg-slate-100', 'hover:bg-indigo-100', 'text-slate-600', 'hover:text-indigo-600'];
-          var recordingClasses = ['bg-rose-500', 'text-white', 'animate-pulse'];
 
-          function setRecordingStyle(isRecording) {{
-            idleClasses.forEach(function(c) {{ micButton.classList.toggle(c, !isRecording); }});
-            recordingClasses.forEach(function(c) {{ micButton.classList.toggle(c, isRecording); }});
-          }}
+DASHBOARD_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Shaked Hub</title>
+  {{HEAD}}
+  <script>
+    (function() {
+      try {
+        // IANA zone names only contain cookie-safe characters, so the value is stored raw.
+        var detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        var match = document.cookie.match(/(?:^|;\\s*)user_tz=([^;]*)/);
+        var current = match ? match[1] : null;
+        if (detected && detected !== current) {
+          document.cookie = "user_tz=" + detected + ";path=/;max-age=31536000;SameSite=Lax";
+          location.reload();
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen">
+  <header class="bg-white shadow-sm sticky top-0 z-10" style="padding-top: env(safe-area-inset-top)">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+      <div>
+        <h1 class="text-xl font-bold text-slate-800">📊 Shaked Hub</h1>
+        <p class="text-xs text-slate-400">{{SUBTITLE}} · <span id="updated">{{UPDATED}}</span></p>
+      </div>
+      <div class="flex items-center gap-3">
+        <button id="refresh" class="text-xl text-slate-500 active:rotate-180 transition-transform" title="Refresh">↻</button>
+        <a href="/logout" class="text-xs text-slate-400">Sign out</a>
+      </div>
+    </div>
+  </header>
+  <main class="max-w-6xl mx-auto px-4 py-4 flex flex-col gap-4">
+    <nav class="grid grid-cols-5 gap-2">{{QUICK_LINKS}}</nav>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {{ACTION_CARD}}
+    </div>
+    <div id="cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">{{CARDS}}</div>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">{{PUSH_CARD}}</div>
+  </main>
+  <script>
+    (function() {
+      var cards = document.getElementById('cards');
+      var updated = document.getElementById('updated');
+      var refreshButton = document.getElementById('refresh');
+      var STORE = 'hub-cards';
 
-          micButton.addEventListener('click', function() {{
-            if (!recording) {{
-              navigator.mediaDevices.getUserMedia({{ audio: true }}).then(function(stream) {{
-                mediaRecorder = new MediaRecorder(stream);
-                chunks = [];
-                mediaRecorder.ondataavailable = function(e) {{ if (e.data.size > 0) chunks.push(e.data); }};
-                mediaRecorder.onstop = function() {{
-                  stream.getTracks().forEach(function(t) {{ t.stop(); }});
-                  setRecordingStyle(false);
-                  micButton.textContent = '⏳';
-                  micButton.disabled = true;
-                  var blob = new Blob(chunks, {{ type: 'audio/webm' }});
-                  var formData = new FormData();
-                  formData.append('audio', blob, 'recording.webm');
-                  fetch('/transcribe', {{ method: 'POST', body: formData }})
-                    .then(function(r) {{ return r.json(); }})
-                    .then(function(data) {{
-                      if (data.text) {{ textInput.value = data.text; textInput.focus(); }}
-                    }})
-                    .catch(function() {{}})
-                    .finally(function() {{
-                      micButton.textContent = '🎤';
-                      micButton.disabled = false;
-                    }});
-                }};
-                mediaRecorder.start();
-                recording = true;
-                micButton.textContent = '⏹️';
-                setRecordingStyle(true);
-              }}).catch(function() {{
-                micButton.title = 'Microphone access denied';
-              }});
-            }} else {{
-              mediaRecorder.stop();
-              recording = false;
-            }}
-          }});
-        }})();
-      </script>
-    </body>
-    </html>
-    """
+      function show(html, when) {
+        cards.innerHTML = html;
+        if (when) updated.textContent = when;
+      }
+      function save(data) {
+        try { localStorage.setItem(STORE, JSON.stringify(data)); } catch (e) {}
+      }
+      // The server had nothing cached (it just woke up): show this phone's last copy right away.
+      if ('{{HAVE_CACHE}}' === '0') {
+        try {
+          var saved = JSON.parse(localStorage.getItem(STORE) || 'null');
+          if (saved && saved.html) show(saved.html, saved.updated + ' (שמור)');
+        } catch (e) {}
+      } else {
+        save({ html: cards.innerHTML, updated: updated.textContent });
+      }
+
+      var loading = false;
+      function load(wait) {
+        if (loading) return;
+        loading = true;
+        refreshButton.classList.add('animate-spin');
+        fetch('/api/cards' + (wait ? '?wait=1' : ''), { credentials: 'same-origin' })
+          .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+          .then(function(data) { show(data.html, data.updated); save(data); })
+          .catch(function() {})
+          .finally(function() { loading = false; refreshButton.classList.remove('animate-spin'); });
+      }
+      if ('{{STALE}}' === '1') load(true);
+      refreshButton.addEventListener('click', function() { load(true); });
+      // Coming back to the app after a while refreshes it.
+      var hiddenAt = 0;
+      document.addEventListener('visibilitychange', function() {
+        if (document.hidden) { hiddenAt = Date.now(); }
+        else if (hiddenAt && Date.now() - hiddenAt > 60000) { load(true); }
+      });
+
+      function post(url, body) {
+        return fetch(url, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+        }).then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); });
+      }
+
+      // Buttons inside the cards (the cards are replaced on refresh, so listen on the container).
+      cards.addEventListener('click', function(e) {
+        var button = e.target.closest('button');
+        if (!button) return;
+        if (button.dataset.task) {
+          button.disabled = true;
+          post('/uni/done', { key: button.dataset.task, done: button.dataset.done === '1' })
+            .then(function() { load(true); })
+            .catch(function() { button.disabled = false; button.textContent = 'שגיאה'; });
+        } else if (button.dataset.mailAction) {
+          button.disabled = true;
+          post('/mail/' + button.dataset.id + '/action', { action: button.dataset.mailAction })
+            .then(function() {
+              var row = button.closest('[data-mail]');
+              if (row) row.style.opacity = '0.4';
+              button.textContent = '✓';
+            })
+            .catch(function() { button.disabled = false; button.textContent = 'שגיאה'; });
+        } else if (button.id === 'garmin-sync') {
+          button.disabled = true;
+          button.textContent = 'מסנכרן…';
+          post('/garmin/sync').then(function() {
+            var tries = 0;
+            var timer = setInterval(function() {
+              tries += 1;
+              fetch('/garmin/status', { credentials: 'same-origin' }).then(function(r) { return r.json(); })
+                .then(function(s) {
+                  if (!s.running || tries > 40) { clearInterval(timer); load(true); }
+                });
+            }, 3000);
+          }).catch(function() { button.disabled = false; button.textContent = 'שגיאה'; });
+        }
+      });
+    })();
+  </script>
+  <script>
+    (function() {
+      var button = document.getElementById('push-button');
+      var status = document.getElementById('push-status');
+      if (!button) return;
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        status.textContent = 'On iPhone, open Shaked Hub from the home screen to enable notifications.';
+        button.remove();
+        return;
+      }
+      function toBytes(base64) {
+        var padded = (base64 + '='.repeat((4 - base64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+        return Uint8Array.from(atob(padded), function(c) { return c.charCodeAt(0); });
+      }
+      function sameKey(subscription) {
+        try {
+          var current = new Uint8Array(subscription.options.applicationServerKey);
+          var wanted = toBytes(button.dataset.key);
+          return current.length === wanted.length && current.every(function(b, i) { return b === wanted[i]; });
+        } catch (e) { return false; }
+      }
+      navigator.serviceWorker.ready.then(function(reg) {
+        return reg.pushManager.getSubscription();
+      }).then(function(existing) {
+        if (existing && Notification.permission === 'granted' && sameKey(existing)) {
+          status.textContent = 'Notifications are on for this device ✅';
+          button.textContent = 'Send a test notification';
+        } else if (existing || Notification.permission === 'granted') {
+          status.textContent = 'ההתראות צריכות חיבור מחדש. לחץ כאן פעם אחת.';
+          button.textContent = 'הפעל התראות מחדש';
+        }
+      });
+      button.addEventListener('click', function() {
+        button.disabled = true;
+        Notification.requestPermission().then(function(permission) {
+          if (permission !== 'granted') throw new Error('denied');
+          return navigator.serviceWorker.ready;
+        }).then(function(reg) {
+          // Start from a fresh subscription so a changed server key never leaves a stale one behind.
+          return reg.pushManager.getSubscription().then(function(existing) {
+            return existing ? existing.unsubscribe() : null;
+          }).then(function() {
+            return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: toBytes(button.dataset.key) });
+          });
+        }).then(function(subscription) {
+          return fetch('/push/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(subscription)
+          });
+        }).then(function(r) {
+          return r.json().then(function(body) { if (!r.ok || !body.sent) throw new Error('send'); });
+        }).then(function() {
+          status.textContent = 'Notifications are on for this device ✅ (a test was just sent)';
+          button.textContent = 'Send a test notification';
+          button.disabled = false;
+        }).catch(function(e) {
+          status.textContent = e.message === 'denied'
+            ? 'Notifications are blocked. Allow them in Settings > Notifications > Shaked Hub.'
+            : e.message === 'send' ? 'Saved, but the test notification failed. Tell Claude.' : 'Could not enable notifications. Try again.';
+          button.disabled = false;
+        });
+      });
+    })();
+  </script>
+  <script>
+    (function() {
+      var micButton = document.getElementById('mic-button');
+      var textInput = document.getElementById('agent-text-input');
+      if (!micButton || micButton.disabled || !textInput) return;
+      var mediaRecorder = null, chunks = [], recording = false;
+      var idleClasses = ['bg-slate-100', 'hover:bg-indigo-100', 'text-slate-600', 'hover:text-indigo-600'];
+      var recordingClasses = ['bg-rose-500', 'text-white', 'animate-pulse'];
+      function setRecordingStyle(isRecording) {
+        idleClasses.forEach(function(c) { micButton.classList.toggle(c, !isRecording); });
+        recordingClasses.forEach(function(c) { micButton.classList.toggle(c, isRecording); });
+      }
+      micButton.addEventListener('click', function() {
+        if (!recording) {
+          navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+            mediaRecorder = new MediaRecorder(stream);
+            chunks = [];
+            mediaRecorder.ondataavailable = function(e) { if (e.data.size > 0) chunks.push(e.data); };
+            mediaRecorder.onstop = function() {
+              stream.getTracks().forEach(function(t) { t.stop(); });
+              setRecordingStyle(false);
+              micButton.textContent = '⏳';
+              micButton.disabled = true;
+              var formData = new FormData();
+              formData.append('audio', new Blob(chunks, { type: 'audio/webm' }), 'recording.webm');
+              fetch('/transcribe', { method: 'POST', body: formData })
+                .then(function(r) { return r.json(); })
+                .then(function(data) { if (data.text) { textInput.value = data.text; textInput.focus(); } })
+                .catch(function() {})
+                .finally(function() { micButton.textContent = '🎤'; micButton.disabled = false; });
+            };
+            mediaRecorder.start();
+            recording = true;
+            micButton.textContent = '⏹️';
+            setRecordingStyle(true);
+          }).catch(function() { micButton.title = 'Microphone access denied'; });
+        } else {
+          mediaRecorder.stop();
+          recording = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
+"""
+
+
+@app.route("/mail/<message_id>/action", methods=["POST"])
+def mail_action(message_id):
+    if not re.fullmatch(r"[0-9a-fA-F]+", message_id):
+        return jsonify({"error": "bad id"}), 404
+    action = (request.get_json(silent=True) or {}).get("action")
+    remove = {"read": ["UNREAD"], "archive": ["INBOX", "UNREAD"]}.get(action)
+    if not remove:
+        return jsonify({"error": "unknown action"}), 400
+    try:
+        service = build("gmail", "v1", credentials=google_auth.get_credentials(google_auth.SCOPES))
+        service.users().messages().modify(userId="me", id=message_id, body={"removeLabelIds": remove}).execute()
+        invalidate_cards()
+        return jsonify({"ok": True})
+    except Exception as e:
+        print(f"[ERROR] mail action: {e}", file=sys.stderr)
+        return jsonify({"error": "failed"}), 500
+
+
+@app.route("/garmin/sync", methods=["POST"])
+def garmin_sync_now():
+    if not garmin_sync_agent.is_configured():
+        return jsonify({"error": "not configured"}), 503
+    garmin_sync_agent.run_in_background(_after_garmin_sync)
+    return jsonify({"started": True})
+
+
+@app.route("/garmin/status")
+def garmin_status():
+    return jsonify(garmin_sync_agent.status())
+
+
+def _after_garmin_sync(result):
+    if result.get("ok"):
+        garmin_agent.clear_cache()
+        invalidate_cards()
 
 
 @app.route("/push/subscribe", methods=["POST"])
@@ -726,8 +1037,8 @@ def push_subscribe():
         return jsonify({"error": "Missing subscription"}), 400
     try:
         push_agent.save_subscription(subscription)
-        push_agent.send_to_all("🔔 Shaked Hub", "ההתראות פועלות במכשיר הזה.")
-        return jsonify({"ok": True})
+        sent = push_agent.send_to_all("🔔 Shaked Hub", "ההתראות פועלות במכשיר הזה.")
+        return jsonify({"ok": True, "sent": sent})
     except Exception as e:
         print(f"[ERROR] push_subscribe: {e}", file=sys.stderr)
         return jsonify({"error": "Could not save subscription"}), 500
@@ -818,12 +1129,21 @@ def mail_view(message_id):
 
 @app.route("/uni/done", methods=["POST"])
 def uni_done():
-    key = request.form.get("key", "")
+    body = request.get_json(silent=True)
+    if body is not None:
+        key, done = body.get("key", ""), bool(body.get("done"))
+    else:
+        key, done = request.form.get("key", ""), request.form.get("done") == "1"
+    ok = False
     if key:
         try:
-            uni_agent.set_done(key, request.form.get("done") == "1")
+            uni_agent.set_done(key, done)
+            invalidate_cards()
+            ok = True
         except Exception as e:
             print(f"[ERROR] uni_done: {e}", file=sys.stderr)
+    if body is not None:
+        return (jsonify({"ok": True}), 200) if ok else (jsonify({"error": "failed"}), 500)
     return redirect("/#uni")
 
 
@@ -887,6 +1207,121 @@ def transcribe():
         print(f"[ERROR] transcribe: {e}", file=sys.stderr)
         return jsonify({"error": "Could not transcribe audio"}), 500
 
+
+
+# ---------- background work ----------
+# Render's free plan sleeps after 15 minutes without outside traffic, and GitHub's scheduled
+# runs come only every few hours. So the server keeps itself awake: every 10 minutes it calls
+# its own public address and runs the university check, and every 2 hours it syncs Garmin.
+
+PING_EVERY = 10 * 60
+UNI_EVERY = 10 * 60
+GARMIN_EVERY = 2 * 60 * 60
+_background = {"started_at": time.time(), "ticks": 0, "ping": None, "last_uni": 0, "last_garmin": 0, "last_ping": 0}
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True})
+
+
+def _ping_self():
+    base = os.environ.get("RENDER_EXTERNAL_URL")
+    if not base:
+        return
+    try:
+        response = requests.get(base.rstrip("/") + "/healthz", timeout=30)
+        _background["ping"] = {"status": response.status_code, "at": formatting.now_in_tz().strftime("%d/%m %H:%M")}
+    except Exception as e:
+        _background["ping"] = {"error": type(e).__name__, "at": formatting.now_in_tz().strftime("%d/%m %H:%M")}
+
+
+def _start_uni_check():
+    with _uni_check["lock"]:
+        if _uni_check["thread"] is not None and _uni_check["thread"].is_alive():
+            return False
+        _uni_check["thread"] = threading.Thread(target=_run_uni_check, daemon=True)
+        _uni_check["thread"].start()
+        return True
+
+
+def _background_loop():
+    time.sleep(15)
+    try:
+        refresh_cards_async(formatting.DEFAULT_TZ_NAME)
+    except Exception as e:
+        print(f"[ERROR] warm cards: {e}", file=sys.stderr)
+    while True:
+        now = time.time()
+        _background["ticks"] += 1
+        try:
+            if now - _background["last_ping"] >= PING_EVERY:
+                _background["last_ping"] = now
+                _ping_self()
+            if os.environ.get("CRON_SECRET") and now - _background["last_uni"] >= UNI_EVERY:
+                _background["last_uni"] = now
+                _start_uni_check()
+            if garmin_sync_agent.is_configured() and now - _background["last_garmin"] >= GARMIN_EVERY:
+                _background["last_garmin"] = now
+                garmin_sync_agent.run_in_background(_after_garmin_sync)
+        except Exception as e:
+            print(f"[ERROR] background: {type(e).__name__}: {e}", file=sys.stderr)
+        time.sleep(60)
+
+
+def start_background():
+    if os.environ.get("HUB_NO_BACKGROUND"):
+        return
+    threading.Thread(target=_background_loop, daemon=True, name="hub-background").start()
+
+
+start_background()
+
+
+@app.route("/tasks/status", methods=["GET", "POST"])
+def task_status():
+    """Health of every connection, for the scheduled GitHub run to print (no secrets in it)."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    report = {
+        "server": {
+            "pid": os.getpid(),
+            "uptime_min": round((time.time() - _background["started_at"]) / 60),
+            "threads": bool(request.environ.get("wsgi.multithread")),
+            "background_ticks": _background["ticks"],
+            "self_ping": _background["ping"],
+        },
+    }
+
+    def check(name, fn):
+        try:
+            report[name] = fn()
+        except Exception as e:
+            report[name] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    def google():
+        creds = google_auth.get_credentials(google_auth.SCOPES)
+        gmail = build("gmail", "v1", credentials=creds)
+        gmail.users().labels().list(userId="me").execute()
+        build("calendar", "v3", credentials=creds).calendarList().list(maxResults=1).execute()
+        return {"gmail": "ok", "calendar": "ok"}
+
+    def push():
+        return {"source": push_agent.key_source() or (push_agent.key_pair() and push_agent.key_source()),
+                "problem": push_agent.private_key_problem(), "devices": push_agent.device_count()}
+
+    def garmin():
+        return {"in_supabase": garmin_agent.latest_dates(), "cloud_sync": garmin_sync_agent.is_configured(),
+                **garmin_sync_agent.status()}
+
+    check("google", google)
+    check("push", push)
+    check("garmin", garmin)
+    report["uni_last_run"] = _uni_check["last"]
+    entry = cached_cards(formatting.DEFAULT_TZ_NAME)
+    report["cards_cache_age_s"] = round(time.time() - entry["at"]) if entry else None
+    return jsonify(report)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
