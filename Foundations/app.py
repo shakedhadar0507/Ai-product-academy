@@ -1269,13 +1269,22 @@ def _background_loop():
         time.sleep(60)
 
 
+_background_owner = {"pid": None, "lock": threading.Lock()}
+
+
+@app.before_request
 def start_background():
-    if os.environ.get("HUB_NO_BACKGROUND"):
-        return
-    threading.Thread(target=_background_loop, daemon=True, name="hub-background").start()
-
-
-start_background()
+    """Start the loop in the process that serves requests. Started lazily (not on import),
+    because with a preloading server the import happens in a parent process whose threads
+    never reach the worker."""
+    if os.environ.get("HUB_NO_BACKGROUND") or _background_owner["pid"] == os.getpid():
+        return None
+    with _background_owner["lock"]:
+        if _background_owner["pid"] != os.getpid():
+            _background_owner["pid"] = os.getpid()
+            _background["started_at"] = time.time()
+            threading.Thread(target=_background_loop, daemon=True, name="hub-background").start()
+    return None
 
 
 @app.route("/tasks/status", methods=["GET", "POST"])
@@ -1290,6 +1299,7 @@ def task_status():
             "uptime_min": round((time.time() - _background["started_at"]) / 60),
             "threads": bool(request.environ.get("wsgi.multithread")),
             "background_ticks": _background["ticks"],
+            "background_pid": _background_owner["pid"],
             "self_ping": _background["ping"],
         },
     }
