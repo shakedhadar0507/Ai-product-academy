@@ -1,3 +1,4 @@
+import re
 import sys
 import time
 
@@ -52,8 +53,17 @@ def _summarize_training(training_summary):
     )
 
 
-def get_insight(calendar_data, weather_data, email_summary, training_summary, tz_name=formatting.DEFAULT_TZ_NAME):
-    cache_key = (tz_name, formatting.today_in_tz(tz_name).isoformat())
+def _clean(text):
+    """Plain sentences only: no markdown marks and no title line (the card already has one)."""
+    text = re.sub(r"[*_#`]+", "", text).strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 1 and len(lines[0]) < 40 and not lines[0].endswith((".", "!", "?")):
+        lines = lines[1:]
+    return " ".join(lines)
+
+
+def get_insight(calendar_data, weather_data, email_summary, training_summary, tz_name=formatting.DEFAULT_TZ_NAME, lang="he"):
+    cache_key = (tz_name, lang, formatting.today_in_tz(tz_name).isoformat())
     cached = _insight_cache.get(cache_key)
     if cached and time.time() - cached[0] < CACHE_TTL_SECONDS:
         return cached[1]
@@ -65,9 +75,10 @@ def get_insight(calendar_data, weather_data, email_summary, training_summary, tz
             "You're writing a short daily brief for someone by combining several "
             "data sources about their day. Some sources may be unavailable — just "
             "work with whatever is available, don't dwell on what's missing. Give a "
-            "short, prioritized daily brief in Hebrew, max 3-4 sentences: what "
+            f"short, prioritized daily brief in {'English' if lang == 'en' else 'Hebrew'}, max 3-4 sentences: what "
             "matters most today, any conflicts between the different areas, and one "
-            "practical suggestion that ties the day together.\n\n"
+            "practical suggestion that ties the day together. Write plain sentences only: "
+            "no title or heading, no markdown, no asterisks or bullet points.\n\n"
             f"Calendar:\n{_summarize_calendar(calendar_data)}\n\n"
             f"Weather:\n{_summarize_weather(weather_data)}\n\n"
             f"Email:\n{_summarize_email(email_summary)}\n\n"
@@ -81,7 +92,7 @@ def get_insight(calendar_data, weather_data, email_summary, training_summary, tz
             messages=[{"role": "user", "content": prompt}],
         )
 
-        insight = next(block.text for block in response.content if block.type == "text")
+        insight = _clean(next(block.text for block in response.content if block.type == "text"))
     except Exception as e:
         print(f"[ERROR] daily_brief: {e}", file=sys.stderr)
         insight = "Could not generate daily brief"
