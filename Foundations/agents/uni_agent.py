@@ -396,6 +396,9 @@ def run_check():
             except Exception as e:
                 errors.append(_moodle_error(e))
         return {"ok": False, "errors": errors, "alerts": 0, "pushed": 0, "setup": setup_status()}
+    if push_agent.device_count() == 0:
+        # No phone to send to yet: wait, so alerts are not used up before notifications are on.
+        return {"ok": False, "errors": ["push: no device subscribed"], "alerts": 0, "pushed": 0, "setup": setup_status()}
     fresh = set()
     if is_configured():
         try:
@@ -452,7 +455,7 @@ def setup_status():
     except Exception as e:
         status["anthropic_key"] = f"error: {type(e).__name__}"
     try:
-        status["push_devices"] = len(push_agent.rest("GET", push_agent.TABLE, params={"select": "endpoint"}))
+        status["push_devices"] = push_agent.device_count()
     except Exception as e:
         status["push_devices"] = f"error: {type(e).__name__}"
     return status
