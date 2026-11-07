@@ -37,6 +37,7 @@ from agents import (
     gmail_agent,
     google_auth,
     push_agent,
+    notes_agent,
     uni_agent,
     weather_agent,
 )
@@ -51,7 +52,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=30),
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
-    # Static files carry a version in their link (app.css?v=4), so phones may keep them a year.
+    # Static files carry a version in their link (app.css?v=5), so phones may keep them a year.
     SEND_FILE_MAX_AGE_DEFAULT=timedelta(days=365),
 )
 
@@ -60,7 +61,7 @@ app.config.update(
 # The scheduled check authenticates with CRON_SECRET instead.
 PUBLIC_PATHS = {
     "/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/healthz",
-    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status",
+    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/notes-selftest",
 }
 
 
@@ -77,7 +78,7 @@ def credentials_valid(given_username, given_password):
 
 @app.before_request
 def require_login():
-    if request.path in PUBLIC_PATHS or request.path.startswith(("/static/", "/lang/")):
+    if request.path in PUBLIC_PATHS or request.path.startswith(("/static/", "/lang/", "/notes/in/")):
         return None
     if session.get("authenticated"):
         return None
@@ -108,7 +109,7 @@ def login():
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>{tr(lang, 'sign_in')} · Shaked Hub</title>
       {PWA_HEAD_TAGS}
-      <link rel="stylesheet" href="/static/app.css?v=4">
+      <link rel="stylesheet" href="/static/app.css?v=5">
     </head>
     <body class="bg-slate-100 min-h-screen flex items-center justify-center p-4">
       <form method="POST" class="bg-white rounded-2xl shadow-md p-8 w-full max-w-sm flex flex-col gap-3">
@@ -243,7 +244,7 @@ STRINGS = {
         "calendar": "היומן היום", "open_calendar": "פתח יומן", "no_events": "אין אירועים היום.",
         "ai_insight": "תובנת AI", "open_in_calendar": "פתח ב-Google Calendar", "all_day": "כל היום",
         "calendar_error": "לא הצלחתי לטעון את היומן",
-        "uni": "מטלות לימודים", "no_tasks": "אין מטלות פתוחות.", "overdue": "לא בוצע", "done": "✓ בוצע", "undo": "בטל",
+        "uni": "משימות", "notes_setup": "📝 חיבור הפתקים", "no_tasks": "אין משימות פתוחות.", "overdue": "לא בוצע", "done": "✓ בוצע", "undo": "בטל",
         "uni_error": "לא הצלחתי לטעון את המטלות",
         "inbox": "מיילים", "open_gmail": "פתח Gmail", "no_mail": "אין מיילים", "open_mail": "פתח מייל",
         "mark_read": "נקרא", "inbox_error": "לא הצלחתי לטעון את המיילים", "other_mail": "כל השאר",
@@ -282,7 +283,7 @@ STRINGS = {
         "calendar": "Today's Calendar", "open_calendar": "Open calendar", "no_events": "No events today.",
         "ai_insight": "AI insight", "open_in_calendar": "Open in Google Calendar", "all_day": "All day",
         "calendar_error": "Could not load the calendar",
-        "uni": "University tasks", "no_tasks": "No open tasks.", "overdue": "Missed", "done": "✓ Done", "undo": "Undo",
+        "uni": "Tasks", "notes_setup": "📝 Connect Notes", "no_tasks": "No open tasks.", "overdue": "Missed", "done": "✓ Done", "undo": "Undo",
         "uni_error": "Could not load university tasks",
         "inbox": "Mail", "open_gmail": "Open Gmail", "no_mail": "No mail", "open_mail": "Open mail",
         "mark_read": "Read", "inbox_error": "Could not load mail", "other_mail": "Everything else",
@@ -510,6 +511,7 @@ def card_uni(tz_name, data):
                     f"</div>"
                 )
             body = f"<div id='uni'>{render_list(items)}</div>"
+        body += (f"<a href='/notes/setup' class='block text-xs text-indigo-600 mt-3'>{tr(lang, 'notes_setup')}</a>")
     except Exception as e:
         print(f"[ERROR] uni card: {e}", file=sys.stderr)
         body = render_error(tr(lang, "uni_error"))
@@ -871,7 +873,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="/static/app.css?v=4">
+  <link rel="stylesheet" href="/static/app.css?v=5">
 </head>
 <body class="bg-slate-100 min-h-screen">
   <header class="bg-white shadow-sm sticky top-0 z-10" style="padding-top: env(safe-area-inset-top)">
@@ -1124,7 +1126,7 @@ MAIL_PAGE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{subject} · Shaked Hub</title>
   {head}
-  <link rel="stylesheet" href="/static/app.css?v=4">
+  <link rel="stylesheet" href="/static/app.css?v=5">
 </head>
 <body class="bg-slate-100 min-h-screen p-4">
   <main class="max-w-2xl mx-auto flex flex-col gap-4">
@@ -1264,6 +1266,77 @@ def agent_action():
 
 
 
+@app.route("/notes/in/<token>", methods=["POST"])
+def notes_in(token):
+    """Called by the iPhone Shortcut when the Notes app closes. The token in the URL is the login."""
+    if not notes_agent.token_ok(token):
+        return Response("Forbidden", 403)
+    data = request.get_json(silent=True) or {}
+    text = data.get("text") if isinstance(data, dict) else None
+    if not isinstance(text, str):
+        text = request.get_data(as_text=True)
+    if not text.strip():
+        return jsonify({"ok": True, "notes": 0})
+    notes_agent.ingest_in_background(text)
+    return jsonify({"ok": True, "notes": len(notes_agent.split_notes(text))})
+
+
+@app.route("/tasks/notes-selftest", methods=["POST"])
+def notes_selftest():
+    """Live check of the Notes reader on a sample note: nothing is saved or pushed."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    sample = (f"{notes_agent.NOTE_MARK}משימות\nמחר ב-15:00 רופא שיניים\nלקנות חלב\n"
+              f"{notes_agent.NOTE_MARK}לימודים\nלהגיש תרגיל במיקרו עד יום חמישי")
+    try:
+        return jsonify({"ok": True, "token_ready": bool(notes_agent.token()), **notes_agent.ingest(sample, dry_run=True)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"})
+
+
+NOTES_SETUP_PAGE = """<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>חיבור הפתקים</title><link rel="stylesheet" href="/static/app.css?v=5"></head>
+<body class="bg-slate-100 min-h-screen p-4 text-slate-800">
+<main class="max-w-xl mx-auto bg-white rounded-2xl shadow-md p-5 flex flex-col gap-4 text-sm leading-relaxed">
+  <a href="/" class="text-indigo-600">→ חזרה</a>
+  <h1 class="text-xl font-bold">📝 חיבור הפתקים</h1>
+  <p>קיצור דרך באייפון ישלח לכאן את הפתקים שערכת לאחרונה בכל פעם שתסגור את אפליקציית הפתקים.
+     Claude יוציא מהם כל דבר עם תאריך או שעה, ותקבל פוש בזמן. הטקסט של הפתקים לא נשמר.</p>
+  <div>
+    <p class="font-semibold mb-1">הכתובת האישית שלך (סודית, אל תשתף):</p>
+    <input id="url" readonly value="{{URL}}" dir="ltr" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-xs">
+    <button onclick="navigator.clipboard.writeText(document.getElementById('url').value);this.textContent='✓ הועתק'"
+            class="mt-2 bg-indigo-500 text-white rounded-lg px-4 py-2">העתק כתובת</button>
+  </div>
+  <ol class="list-decimal pr-5 flex flex-col gap-2">
+    <li>פתח את <b>קיצורים</b> (Shortcuts) ← <b>אוטומציה</b> ← <b>+</b> ← <b>יישום</b> (App).</li>
+    <li>בחר <b>פתקים</b>, סמן <b>נסגר</b> (Is Closed), ובחר <b>הפעל מיד</b> (Run Immediately) ← הבא ← <b>אוטומציה ריקה חדשה</b>.</li>
+    <li>הוסף פעולה <b>חפש פתקים</b> (Find Notes): הוסף מסנן <b>תאריך שינוי אחרון</b> ← <b>ביום האחרון</b>. מיון: תאריך שינוי אחרון, החדש ביותר. הגבלה: 15.</li>
+    <li>הוסף <b>חזור עם כל אחד</b> (Repeat with Each). בתוכו הוסף פעולת <b>טקסט</b> וכתוב בה:<br>
+      <code dir="ltr" class="block bg-slate-100 rounded p-2 my-1">@@NOTE@@ [Repeat Item]</code>
+      כש־[Repeat Item] הוא המשתנה "פריט חוזר" (הקש עליו כדי להוסיף).</li>
+    <li>אחרי <b>סיים חזרה</b> הוסף <b>צרף טקסט</b> (Combine Text) על <b>תוצאות החזרה</b>, עם <b>שורה חדשה</b>.</li>
+    <li>הוסף <b>קבל תוכן של כתובת URL</b> (Get Contents of URL): הדבק את הכתובת למעלה, הרחב (▸): שיטה <b>POST</b>,
+        גוף בקשה <b>JSON</b>, הוסף שדה טקסט בשם <code>text</code> שהערך שלו הוא <b>טקסט מצורף</b>.</li>
+    <li>שמור. כדי לבדוק: כתוב בפתק "מחר ב־10:00 בדיקה", צא מהפתקים, ותוך דקה אמור להגיע פוש.</li>
+  </ol>
+  <p class="text-xs text-slate-400">עדכון אחרון שהתקבל: {{LAST}}</p>
+</main></body></html>"""
+
+
+@app.route("/notes/setup")
+def notes_setup():
+    last = notes_agent.status()["last"]
+    last_text = "עוד לא התקבל" if not last else (
+        f"{last.get('at', '')} · {last.get('notes', 0)} פתקים, {last.get('reminders', 0)} תזכורות"
+        if last.get("ok") else f"{last.get('at', '')} · שגיאה")
+    url = request.url_root.replace("http://", "https://").rstrip("/") + "/notes/in/" + notes_agent.token()
+    return NOTES_SETUP_PAGE.replace("{{URL}}", html.escape(url)).replace("{{LAST}}", html.escape(last_text))
+
+
 # ---------- background work ----------
 # Render's free plan sleeps after 15 minutes without outside traffic, and GitHub's scheduled
 # runs come only every few hours. So the server keeps itself awake: every 10 minutes it calls
@@ -1380,6 +1453,7 @@ def task_status():
         return {"in_supabase": garmin_agent.latest_dates(), "cloud_sync": garmin_sync_agent.is_configured(),
                 **garmin_sync_agent.status()}
 
+    report["notes"] = notes_agent.status()
     check("google", google)
     check("push", push)
     check("garmin", garmin)

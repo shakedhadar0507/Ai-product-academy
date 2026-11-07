@@ -46,7 +46,7 @@ STALE_AFTER = timedelta(hours=6)
 
 KIND_ICONS = {
     "assignment": "📚", "exam": "📝", "cancellation": "🚫", "grade": "🎓",
-    "newsletter": "📰", "other": "📬", "moodle": "📚",
+    "newsletter": "📰", "other": "📬", "moodle": "📚", "note": "📝",
 }
 
 _events_cache = {"at": 0, "events": None}
@@ -333,6 +333,9 @@ def _check_moodle():
 def _stages(task, now):
     """Reminder stages of an open task whose time has come, in order: (name, time, title)."""
     due, first_seen = task["due"], task["first_seen"]
+    if task.get("kind") == "note":
+        # A reminder from the Notes app: one push at its time.
+        return [("at", due, "🔔 תזכורת")] if due <= now else []
     lead = due - first_seen
     stages = []
     if lead >= MIDPOINT_MIN_LEAD:
@@ -369,7 +372,8 @@ def _reminders(fresh_keys):
         course = f" · {task['course']}" if task.get("course") else ""
         alerts.append({
             "key": key, "title": title + course,
-            "body": f"{task['title']} — עד {format_due(task['due'])}. לסמן בוצע בדשבורד.",
+            "body": task["title"] if task.get("kind") == "note"
+                    else f"{task['title']} — עד {format_due(task['due'])}. לסמן בוצע בדשבורד.",
             "url": DASHBOARD_URL,
         })
     return alerts, quiet
