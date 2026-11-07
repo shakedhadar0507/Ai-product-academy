@@ -34,3 +34,11 @@ jobs:
           echo
           curl -sS --max-time 90 -X POST -H "X-Cron-Secret: $CRON_SECRET" \
             https://ai-product-academy.onrender.com/tasks/notes-selftest
+      - name: Digest preview (manual runs only, sends nothing)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          echo
+          curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" \
+            https://ai-product-academy.onrender.com/tasks/digest-preview

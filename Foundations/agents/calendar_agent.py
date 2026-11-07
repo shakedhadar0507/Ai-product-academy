@@ -16,11 +16,12 @@ CACHE_TTL_SECONDS = 1800
 _insight_cache = {}
 
 
-def get_data(tz_name=formatting.DEFAULT_TZ_NAME):
+def get_data(tz_name=formatting.DEFAULT_TZ_NAME, days_ahead=0):
+    """Events of today, or of the day `days_ahead` days from today."""
     creds = google_auth.get_credentials(google_auth.SCOPES)
     service = build("calendar", "v3", credentials=creds)
 
-    now = formatting.now_in_tz(tz_name)
+    now = formatting.now_in_tz(tz_name) + datetime.timedelta(days=days_ahead)
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
 

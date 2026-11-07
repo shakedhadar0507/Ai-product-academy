@@ -31,6 +31,7 @@ from agents import (
     action_agent,
     brief_agent,
     calendar_agent,
+    digest_agent,
     formatting,
     garmin_agent,
     garmin_sync_agent,
@@ -61,7 +62,7 @@ app.config.update(
 # The scheduled check authenticates with CRON_SECRET instead.
 PUBLIC_PATHS = {
     "/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/healthz",
-    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/notes-selftest",
+    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/notes-selftest", "/tasks/digest-preview",
 }
 
 
@@ -1295,6 +1296,20 @@ def notes_selftest():
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"})
 
 
+@app.route("/tasks/digest-preview", methods=["POST"])
+def digest_preview():
+    """Live check of the morning/evening digest: builds both texts, sends nothing."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    out = {}
+    for slot in digest_agent.SLOTS:
+        facts = digest_agent.gather(slot)
+        out[slot] = {"events": len(facts["calendar"]), "tasks": len(facts["tasks"]),
+                     "text": digest_agent.compose(slot, facts)}
+    return jsonify(out)
+
+
 NOTES_SETUP_PAGE = """<!DOCTYPE html>
 <html lang="he" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1373,6 +1388,15 @@ def _start_uni_check():
         return True
 
 
+def _run_digest():
+    try:
+        digest_agent.run_if_due()
+    except Exception as e:
+        print(f"[ERROR] digest: {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
+        _background["digest_running"] = False
+
+
 def _background_loop():
     time.sleep(15)
     try:
@@ -1389,6 +1413,9 @@ def _background_loop():
             if os.environ.get("CRON_SECRET") and now - _background["last_uni"] >= UNI_EVERY:
                 _background["last_uni"] = now
                 _start_uni_check()
+            if push_agent.is_configured() and not _background.get("digest_running"):
+                _background["digest_running"] = True
+                threading.Thread(target=_run_digest, daemon=True).start()
             if garmin_sync_agent.is_configured() and now - _background["last_garmin"] >= GARMIN_EVERY:
                 _background["last_garmin"] = now
                 garmin_sync_agent.run_in_background(_after_garmin_sync)
@@ -1454,6 +1481,10 @@ def task_status():
                 **garmin_sync_agent.status()}
 
     report["notes"] = notes_agent.status()
+    try:
+        report["digest"] = push_agent.get_config("digest")
+    except Exception as e:
+        report["digest"] = {"error": type(e).__name__}
     check("google", google)
     check("push", push)
     check("garmin", garmin)
