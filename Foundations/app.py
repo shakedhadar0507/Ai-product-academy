@@ -38,7 +38,6 @@ from agents import (
     google_auth,
     push_agent,
     uni_agent,
-    voice_agent,
     weather_agent,
 )
 
@@ -237,7 +236,7 @@ STRINGS = {
         "dir": "rtl", "other": "en", "other_label": "EN", "sign_out": "התנתק", "refresh": "רענון",
         "q_calendar": "יומן", "q_event": "אירוע", "q_gmail": "Gmail", "q_moodle": "Moodle", "q_garmin": "Garmin",
         "ask_title": "שאל את Claude",
-        "ask_sub": "כתוב או הקלט בקשה: לקבוע אירוע ביומן, לנסח טיוטת מייל ועוד.",
+        "ask_sub": "כתוב בקשה: לקבוע אירוע ביומן, לנסח טיוטת מייל ועוד.",
         "ask_placeholder": "למשל: תקבע רופא שיניים מחר 15:00-16:00", "send": "שלח",
         "loading": "טוען נתונים…", "saved": "(שמור)",
         "brief": "התקציר היומי", "brief_error": "לא הצלחתי ליצור את התקציר היומי",
@@ -265,7 +264,6 @@ STRINGS = {
         "push_sent": "ההתראות פועלות ✅ (נשלחה התראת בדיקה)",
         "push_blocked": "ההתראות חסומות. אפשר אותן בהגדרות > עדכונים > Shaked Hub.",
         "push_send_failed": "נשמר, אבל התראת הבדיקה נכשלה. ספר ל-Claude.", "push_failed": "לא הצלחתי להפעיל התראות. נסה שוב.",
-        "voice_failed": "לא הצלחתי לתמלל את ההקלטה. נסה שוב.", "mic_denied": "אין גישה למיקרופון. אשר גישה בהגדרות Safari.", "voice_off": "הקלטה קולית לא מוגדרת בשרת.",
         "error": "שגיאה",
         "back": "→ חזרה לדשבורד", "open_in_gmail": "פתח ב-Gmail", "reply_to": "תשובה אל {}", "save_draft": "שמור כטיוטה",
         "confirm_send": "לשלוח את התשובה ל-{}?", "reply_sent": "התשובה אל {} נשלחה.", "reply_drafted": "התשובה אל {} נשמרה כטיוטה ב-Gmail.",
@@ -277,7 +275,7 @@ STRINGS = {
         "dir": "ltr", "other": "he", "other_label": "עב", "sign_out": "Sign out", "refresh": "Refresh",
         "q_calendar": "Calendar", "q_event": "Event", "q_gmail": "Gmail", "q_moodle": "Moodle", "q_garmin": "Garmin",
         "ask_title": "Ask Claude",
-        "ask_sub": "Type or speak a request: schedule an event, draft an email, and more.",
+        "ask_sub": "Type a request: schedule an event, draft an email, and more.",
         "ask_placeholder": "e.g. schedule a dentist appointment tomorrow 15:00-16:00", "send": "Send",
         "loading": "Loading…", "saved": "(saved)",
         "brief": "Daily Brief", "brief_error": "Could not generate the daily brief",
@@ -305,7 +303,6 @@ STRINGS = {
         "push_sent": "Notifications are on ✅ (a test was just sent)",
         "push_blocked": "Notifications are blocked. Allow them in Settings > Notifications > Shaked Hub.",
         "push_send_failed": "Saved, but the test notification failed. Tell Claude.", "push_failed": "Could not enable notifications. Try again.",
-        "voice_failed": "Could not transcribe the recording. Try again.", "mic_denied": "No microphone access. Allow it in Safari settings.", "voice_off": "Voice input is not set up on the server.",
         "error": "Error",
         "back": "← Back to dashboard", "open_in_gmail": "Open in Gmail", "reply_to": "Reply to {}", "save_draft": "Save as draft",
         "confirm_send": "Send the reply to {}?", "reply_sent": "Your reply to {} was sent.", "reply_drafted": "Your reply to {} was saved as a Gmail draft.",
@@ -780,13 +777,6 @@ def dashboard():
         if action_messages else ""
     )
 
-    if voice_agent.is_configured():
-        mic_disabled_attr = ""
-        mic_extra_class = "bg-slate-100 hover:bg-indigo-100 text-slate-600 hover:text-indigo-600 cursor-pointer"
-    else:
-        mic_disabled_attr = "data-off='1'"
-        mic_extra_class = "bg-slate-50 text-slate-300"
-
     quick_links = "".join(
         f"<a href='{html.escape(url or uni_agent.MOODLE_URL)}' target='_blank' rel='noopener' "
         f"class='flex flex-col items-center gap-1 bg-white rounded-2xl shadow-sm py-3 active:scale-95 transition-transform'>"
@@ -821,10 +811,6 @@ def dashboard():
                placeholder="{tr(lang, 'ask_placeholder')}"
                class="flex-1 border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
         <div class="flex gap-2">
-          <button type="button" id="mic-button" {mic_disabled_attr}
-                  class="w-11 h-11 shrink-0 flex items-center justify-center rounded-full text-lg transition-all duration-200 active:scale-90 {mic_extra_class}">
-            🎤
-          </button>
           <button type="submit"
                   class="flex-1 sm:flex-none bg-indigo-500 hover:bg-indigo-600 active:scale-95 text-white rounded-lg px-5 py-2.5 text-sm font-medium">
             {tr(lang, 'send')}
@@ -838,7 +824,7 @@ def dashboard():
     header_subtitle = now_local.strftime("%d/%m/%Y")
     js_strings = {k: tr(lang, k) for k in [
         "push_on", "push_test", "push_reconnect", "push_reenable", "push_home", "push_sent",
-        "push_blocked", "push_send_failed", "push_failed", "voice_failed", "mic_denied", "voice_off", "error", "syncing", "saved",
+        "push_blocked", "push_send_failed", "push_failed", "error", "syncing", "saved",
     ]}
 
     page = DASHBOARD_PAGE
@@ -1060,61 +1046,6 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       });
     })();
   </script>
-  <script>
-    (function() {
-      var micButton = document.getElementById('mic-button');
-      var textInput = document.getElementById('agent-text-input');
-      if (!micButton || !textInput) return;
-      if (micButton.dataset.off) {
-        micButton.addEventListener('click', function() { alert(HUB_T.voice_off); });
-        return;
-      }
-      var mediaRecorder = null, chunks = [], recording = false;
-      var idleClasses = ['bg-slate-100', 'hover:bg-indigo-100', 'text-slate-600', 'hover:text-indigo-600'];
-      var recordingClasses = ['bg-rose-500', 'text-white', 'animate-pulse'];
-      function setRecordingStyle(isRecording) {
-        idleClasses.forEach(function(c) { micButton.classList.toggle(c, !isRecording); });
-        recordingClasses.forEach(function(c) { micButton.classList.toggle(c, isRecording); });
-      }
-      micButton.addEventListener('click', function() {
-        if (!recording) {
-          navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
-            // iPhone Safari records audio/mp4, Chrome records webm: name the file by what was really recorded.
-            var types = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
-            var type = types.find(function(t) { return window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t); });
-            mediaRecorder = type ? new MediaRecorder(stream, { mimeType: type }) : new MediaRecorder(stream);
-            chunks = [];
-            mediaRecorder.ondataavailable = function(e) { if (e.data.size > 0) chunks.push(e.data); };
-            mediaRecorder.onstop = function() {
-              stream.getTracks().forEach(function(t) { t.stop(); });
-              setRecordingStyle(false);
-              micButton.textContent = '⏳';
-              micButton.disabled = true;
-              var formData = new FormData();
-              var mime = (mediaRecorder.mimeType || type || 'audio/mp4').split(';')[0];
-              var ext = mime.indexOf('webm') >= 0 ? 'webm' : mime.indexOf('ogg') >= 0 ? 'ogg' : 'mp4';
-              formData.append('audio', new Blob(chunks, { type: mime }), 'recording.' + ext);
-              fetch('/transcribe', { method: 'POST', body: formData })
-                .then(function(r) { return r.json(); })
-                .then(function(data) {
-                  if (data.text) { textInput.value = data.text; textInput.focus(); }
-                  else { alert(HUB_T.voice_failed); }
-                })
-                .catch(function() { alert(HUB_T.voice_failed); })
-                .finally(function() { micButton.textContent = '🎤'; micButton.disabled = false; });
-            };
-            mediaRecorder.start();
-            recording = true;
-            micButton.textContent = '⏹️';
-            setRecordingStyle(true);
-          }).catch(function() { alert(HUB_T.mic_denied); });
-        } else {
-          mediaRecorder.stop();
-          recording = false;
-        }
-      });
-    })();
-  </script>
 </body>
 </html>
 """
@@ -1330,26 +1261,6 @@ def agent_action():
     return redirect(url_for("dashboard"))
 
 
-@app.route("/transcribe", methods=["POST"])
-def transcribe():
-    if not voice_agent.is_configured():
-        return jsonify({"error": "Voice input not configured"}), 503
-    if "audio" not in request.files:
-        return jsonify({"error": "No audio provided"}), 400
-
-    audio = request.files["audio"]
-    _voice_last.update(at=formatting.now_in_tz().strftime("%d/%m %H:%M"), mimetype=audio.mimetype, filename=audio.filename)
-    try:
-        text = voice_agent.transcribe(audio)
-        _voice_last.update(ok=True, error=None)
-        return jsonify({"text": text})
-    except Exception as e:
-        print(f"[ERROR] transcribe: {e}", file=sys.stderr)
-        _voice_last.update(ok=False, error=f"{type(e).__name__}: {str(e)[:160]}")
-        return jsonify({"error": "Could not transcribe audio"}), 500
-
-
-_voice_last = {}
 
 
 
@@ -1469,7 +1380,6 @@ def task_status():
         return {"in_supabase": garmin_agent.latest_dates(), "cloud_sync": garmin_sync_agent.is_configured(),
                 **garmin_sync_agent.status()}
 
-    report["voice"] = {"configured": voice_agent.is_configured(), "last": _voice_last or None}
     check("google", google)
     check("push", push)
     check("garmin", garmin)
