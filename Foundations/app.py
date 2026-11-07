@@ -275,7 +275,7 @@ STRINGS = {
         "dir": "ltr", "other": "he", "other_label": "עב", "sign_out": "Sign out", "refresh": "Refresh",
         "q_calendar": "Calendar", "q_event": "Event", "q_gmail": "Gmail", "q_moodle": "Moodle", "q_garmin": "Garmin",
         "ask_title": "Ask Claude",
-        "ask_sub": "Type or speak a request: schedule an event, draft an email, and more.",
+        "ask_sub": "Type a request: schedule an event, draft an email, and more.",
         "ask_placeholder": "e.g. schedule a dentist appointment tomorrow 15:00-16:00", "send": "Send",
         "loading": "Loading…", "saved": "(saved)",
         "brief": "Daily Brief", "brief_error": "Could not generate the daily brief",
