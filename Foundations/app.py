@@ -31,6 +31,7 @@ from agents import (
     action_agent,
     brief_agent,
     calendar_agent,
+    chat_agent,
     digest_agent,
     formatting,
     garmin_agent,
@@ -53,7 +54,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=30),
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
-    # Static files carry a version in their link (app.css?v=5), so phones may keep them a year.
+    # Static files carry a version in their link (app.css?v=6), so phones may keep them a year.
     SEND_FILE_MAX_AGE_DEFAULT=timedelta(days=365),
 )
 
@@ -62,7 +63,7 @@ app.config.update(
 # The scheduled check authenticates with CRON_SECRET instead.
 PUBLIC_PATHS = {
     "/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/healthz",
-    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/notes-selftest", "/tasks/digest-preview",
+    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/notes-selftest", "/tasks/digest-preview", "/tasks/chat-selftest",
 }
 
 
@@ -110,7 +111,7 @@ def login():
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>{tr(lang, 'sign_in')} · Shaked Hub</title>
       {PWA_HEAD_TAGS}
-      <link rel="stylesheet" href="/static/app.css?v=5">
+      <link rel="stylesheet" href="/static/app.css?v=6">
     </head>
     <body class="bg-slate-100 min-h-screen flex items-center justify-center p-4">
       <form method="POST" class="bg-white rounded-2xl shadow-md p-8 w-full max-w-sm flex flex-col gap-3">
@@ -238,7 +239,7 @@ STRINGS = {
         "dir": "rtl", "other": "en", "other_label": "EN", "sign_out": "התנתק", "refresh": "רענון",
         "q_calendar": "יומן", "q_event": "אירוע", "q_gmail": "Gmail", "q_moodle": "Moodle", "q_garmin": "Garmin",
         "ask_title": "שאל את Claude",
-        "ask_sub": "כתוב בקשה: לקבוע אירוע ביומן, לנסח טיוטת מייל ועוד.",
+        "ask_sub": "שאל או בקש: מה יש לי מחר, תזכיר לי, תקבע ביומן, תנסח מייל ועוד.", "chat_new": "שיחה חדשה", "chat_thinking": "חושב…", "chat_error": "משהו השתבש. נסה שוב.",
         "ask_placeholder": "למשל: תקבע רופא שיניים מחר 15:00-16:00", "send": "שלח",
         "loading": "טוען נתונים…", "saved": "(שמור)",
         "brief": "התקציר היומי", "brief_error": "לא הצלחתי ליצור את התקציר היומי",
@@ -277,7 +278,7 @@ STRINGS = {
         "dir": "ltr", "other": "he", "other_label": "עב", "sign_out": "Sign out", "refresh": "Refresh",
         "q_calendar": "Calendar", "q_event": "Event", "q_gmail": "Gmail", "q_moodle": "Moodle", "q_garmin": "Garmin",
         "ask_title": "Ask Claude",
-        "ask_sub": "Type a request: schedule an event, draft an email, and more.",
+        "ask_sub": "Ask or request: what is tomorrow, remind me, schedule, draft an email, and more.", "chat_new": "New chat", "chat_thinking": "Thinking…", "chat_error": "Something went wrong. Try again.",
         "ask_placeholder": "e.g. schedule a dentist appointment tomorrow 15:00-16:00", "send": "Send",
         "loading": "Loading…", "saved": "(saved)",
         "brief": "Daily Brief", "brief_error": "Could not generate the daily brief",
@@ -809,17 +810,17 @@ def dashboard():
         <p class="text-sm text-slate-400 mt-0.5">{tr(lang, 'ask_sub')}</p>
       </div>
       {action_result_html}
-      <form method="POST" action="/agent-action" class="flex flex-col sm:flex-row gap-2">
-        <input type="text" name="user_text" id="agent-text-input" required dir="auto"
+      <div id="chat-log" class="flex flex-col gap-2 max-h-96 overflow-y-auto text-sm"></div>
+      <form id="chat-form" method="POST" action="/agent-action" class="flex gap-2">
+        <input type="text" name="user_text" id="agent-text-input" required dir="auto" autocomplete="off"
                placeholder="{tr(lang, 'ask_placeholder')}"
-               class="flex-1 border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
-        <div class="flex gap-2">
-          <button type="submit"
-                  class="flex-1 sm:flex-none bg-indigo-500 hover:bg-indigo-600 active:scale-95 text-white rounded-lg px-5 py-2.5 text-sm font-medium">
-            {tr(lang, 'send')}
-          </button>
-        </div>
+               class="flex-1 min-w-0 border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300">
+        <button type="submit"
+                class="shrink-0 bg-indigo-500 hover:bg-indigo-600 active:scale-95 text-white rounded-lg px-5 py-2.5 text-sm font-medium">
+          {tr(lang, 'send')}
+        </button>
       </form>
+      <button type="button" id="chat-reset" class="hidden self-start text-xs text-slate-400 hover:text-slate-600">{tr(lang, 'chat_new')}</button>
     </section>
     """
 
@@ -827,7 +828,7 @@ def dashboard():
     header_subtitle = now_local.strftime("%d/%m/%Y")
     js_strings = {k: tr(lang, k) for k in [
         "push_on", "push_test", "push_reconnect", "push_reenable", "push_home", "push_sent",
-        "push_blocked", "push_send_failed", "push_failed", "error", "syncing", "saved",
+        "push_blocked", "push_send_failed", "push_failed", "chat_thinking", "chat_error", "error", "syncing", "saved",
     ]}
 
     page = DASHBOARD_PAGE
@@ -874,7 +875,7 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="/static/app.css?v=5">
+  <link rel="stylesheet" href="/static/app.css?v=6">
 </head>
 <body class="bg-slate-100 min-h-screen">
   <header class="bg-white shadow-sm sticky top-0 z-10" style="padding-top: env(safe-area-inset-top)">
@@ -1049,6 +1050,45 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       });
     })();
   </script>
+  <script>
+    (function() {
+      var form = document.getElementById('chat-form'), input = document.getElementById('agent-text-input');
+      var log = document.getElementById('chat-log'), reset = document.getElementById('chat-reset');
+      if (!form || !log) return;
+      function bubble(role, text) {
+        var div = document.createElement('div');
+        div.dir = 'auto';
+        div.className = role === 'user'
+          ? 'self-end max-w-[85%] bg-indigo-500 text-white rounded-2xl px-3 py-2 whitespace-pre-wrap'
+          : 'self-start max-w-[85%] bg-slate-100 text-slate-800 rounded-2xl px-3 py-2 whitespace-pre-wrap';
+        div.textContent = text;
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+        reset.classList.remove('hidden');
+        return div;
+      }
+      fetch('/chat/history').then(function(r) { return r.json(); }).then(function(d) {
+        (d.messages || []).forEach(function(m) { bubble(m.role, m.text); });
+      }).catch(function() {});
+      form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var text = input.value.trim();
+        if (!text) return;
+        input.value = '';
+        bubble('user', text);
+        var wait = bubble('assistant', HUB_T.chat_thinking);
+        wait.classList.add('animate-pulse');
+        fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) })
+          .then(function(r) { return r.json(); })
+          .then(function(d) { wait.textContent = d.reply || HUB_T.chat_error; })
+          .catch(function() { wait.textContent = HUB_T.chat_error; })
+          .finally(function() { wait.classList.remove('animate-pulse'); log.scrollTop = log.scrollHeight; });
+      });
+      reset.addEventListener('click', function() {
+        fetch('/chat/reset', { method: 'POST' }).then(function() { log.innerHTML = ''; reset.classList.add('hidden'); });
+      });
+    })();
+  </script>
 </body>
 </html>
 """
@@ -1127,7 +1167,7 @@ MAIL_PAGE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{subject} · Shaked Hub</title>
   {head}
-  <link rel="stylesheet" href="/static/app.css?v=5">
+  <link rel="stylesheet" href="/static/app.css?v=6">
 </head>
 <body class="bg-slate-100 min-h-screen p-4">
   <main class="max-w-2xl mx-auto flex flex-col gap-4">
@@ -1267,6 +1307,44 @@ def agent_action():
 
 
 
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("message", "")).strip()[:2000]
+    if not text:
+        return jsonify({"reply": ""})
+    try:
+        reply = chat_agent.ask(text)
+    except Exception as e:
+        print(f"[ERROR] chat: {type(e).__name__}: {e}", file=sys.stderr)
+        reply = tr(get_lang(), "chat_error")
+    invalidate_cards()
+    return jsonify({"reply": reply})
+
+
+@app.route("/tasks/chat-selftest", methods=["POST"])
+def chat_selftest():
+    """Live check of the chat: one read-only question, nothing saved."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    try:
+        return jsonify({"ok": True, "reply": chat_agent.ask("מה יש לי מחר ביומן, ואיזו משימה הכי דחופה?", save=False)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"})
+
+
+@app.route("/chat/history")
+def chat_history():
+    return jsonify({"messages": chat_agent.history()})
+
+
+@app.route("/chat/reset", methods=["POST"])
+def chat_reset():
+    chat_agent.reset()
+    return jsonify({"ok": True})
+
+
 @app.route("/notes/in/<token>", methods=["POST"])
 def notes_in(token):
     """Called by the iPhone Shortcut when the Notes app closes. The token in the URL is the login."""
@@ -1313,7 +1391,7 @@ def digest_preview():
 NOTES_SETUP_PAGE = """<!DOCTYPE html>
 <html lang="he" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>חיבור הפתקים</title><link rel="stylesheet" href="/static/app.css?v=5"></head>
+<title>חיבור הפתקים</title><link rel="stylesheet" href="/static/app.css?v=6"></head>
 <body class="bg-slate-100 min-h-screen p-4 text-slate-800">
 <main class="max-w-xl mx-auto bg-white rounded-2xl shadow-md p-5 flex flex-col gap-4 text-sm leading-relaxed">
   <a href="/" class="text-indigo-600">→ חזרה</a>
