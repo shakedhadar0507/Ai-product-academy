@@ -1,0 +1,52 @@
+name: Shaked Hub health check
+
+# The server checks itself every 2 hours and pushes to the phone when something breaks
+# (Claude credit, Google login, Supabase, push, Moodle, Garmin, weather). This daily run is
+# the outside watchdog for what the server can't report itself: the server being down, or
+# an alert that could reach neither the phone nor his email. In those cases the run fails
+# and GitHub emails him. Run it by hand with "test_push" to get a real test notification.
+on:
+  schedule:
+    - cron: "15 5 * * *"   # 07:15 Israel winter time (08:15 summer)
+  workflow_dispatch:
+    inputs:
+      test_push:
+        description: "Send a test notification to the phone even if everything is fine"
+        type: boolean
+        default: false
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run health check on the server
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          TEST: ${{ inputs.test_push && '1' || '0' }}
+        run: |
+          set -e
+          url=https://ai-product-academy.onrender.com/tasks/health
+          # Wakes the server if it slept (free plan) and starts a fresh check.
+          start=$(curl -fsS --retry 3 --retry-delay 30 --retry-all-errors --max-time 120 \
+            -X POST -H "X-Cron-Secret: $CRON_SECRET" "$url?test=$TEST")
+          echo "$start"
+          since=$(echo "$start" | python3 -c "import json,sys; print(json.load(sys.stdin)['now_ts'] - 5)")
+          for i in $(seq 1 30); do
+            sleep 15
+            curl -fsS --max-time 60 -H "X-Cron-Secret: $CRON_SECRET" "$url" > health.json || continue
+            python3 -c "import json,sys; d=json.load(open('health.json')); l=d.get('last') or {}; sys.exit(0 if not d['running'] and l.get('started_ts',0) >= $since else 1)" && break
+          done
+          echo
+          python3 -m json.tool health.json
+      - name: Fail (so GitHub emails) if the check never finished or its alert reached no one
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          last = json.load(open("health.json")).get("last") or {}
+          if not last.get("started_ts"):
+              sys.exit("Health check did not finish on the server")
+          channel = last.get("channel")
+          if last.get("alerted") and channel and not channel.get("push") and not channel.get("email"):
+              sys.exit("Something is broken and the alert reached neither the phone nor email: " + json.dumps(last["checks"], ensure_ascii=False))
+          print("ok" if last["ok"] else "problems found, alert sent: " + json.dumps(last["checks"], ensure_ascii=False))
+          PY

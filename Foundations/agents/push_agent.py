@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from py_vapid import Vapid
 from pywebpush import WebPushException, webpush
 
-from agents import google_auth
+from agents import formatting, google_auth
 
 load_dotenv()
 
@@ -32,6 +32,7 @@ CONFIG_PREFIX = "config:"
 DEVICES_ONLY = {"endpoint": f"not.like.{CONFIG_PREFIX}*"}
 
 _keys = {"lock": threading.Lock(), "pair": None, "source": None}
+_last_send = {"value": None}  # outcome of the latest send_to_all, for the health check
 
 
 def is_configured():
@@ -144,9 +145,10 @@ def save_subscription(subscription):
 
 def send_to_all(title, body, url="/"):
     """Send one notification to every saved device. Returns how many devices got it."""
-    sent = 0
+    sent, devices, error = 0, 0, None
     private = key_pair()[1]
     for row in rest("GET", TABLE, params={"select": "endpoint,subscription", **DEVICES_ONLY}):
+        devices += 1
         try:
             webpush(
                 subscription_info=row["subscription"],
@@ -157,13 +159,23 @@ def send_to_all(title, body, url="/"):
             sent += 1
         except WebPushException as e:
             status = e.response.status_code if e.response is not None else None
+            error = f"push service answered {status}"
             if status in (401, 403, 404, 410):
                 # The device unsubscribed, the app was removed, or it signed up with an older
                 # key (Apple answers 403). It re-subscribes from the dashboard; forget this one.
                 rest("DELETE", TABLE, params={"endpoint": f"eq.{row['endpoint']}"})
             else:
                 print(f"[ERROR] push to {row['endpoint'][:40]}: {e}", file=sys.stderr)
+        except Exception as e:
+            error = type(e).__name__
+            print(f"[ERROR] push to {row['endpoint'][:40]}: {type(e).__name__}: {e}", file=sys.stderr)
+    _last_send["value"] = {"at": formatting.now_in_tz().strftime("%d/%m %H:%M"), "devices": devices,
+                           "sent": sent, "error": error}
     return sent
+
+
+def last_send():
+    return _last_send["value"]
 
 
 def check_uni_mail():
