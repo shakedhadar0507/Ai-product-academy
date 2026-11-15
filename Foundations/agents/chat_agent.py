@@ -116,7 +116,8 @@ Now is {now} ({weekday}), in time zone {tz}.
 
 WRITE_TOOLS = {"create_calendar_event", "update_calendar_event", "delete_calendar_event",
                "create_gmail_draft", "add_reminder", "complete_task"}
-CLAIM_WORDS = re.compile(r"(יצרתי|נוצר|קבעתי|הוספתי|שמרתי|עדכנתי|מחקתי|הזזתי|סימנתי|\b(created|scheduled|added|saved|updated|deleted|moved)\b)", re.I)
+CLAIM_WORDS = re.compile(r"(?<!לא )(?<!not )(יצרתי|נוצר|קבעתי|הוספתי|הכנסתי|שמרתי|עדכנתי|מחקתי|הזזתי|סימנתי|\b(created|scheduled|added|saved|updated|deleted|moved)\b)", re.I)
+RECEIPT_LINE = re.compile(r"^\s*(✅|⚠️).*$", re.M)
 DEADLINE_SECONDS = 95
 
 
@@ -148,6 +149,31 @@ def get_weather(lat=None, lon=None, here=None):
         if not here:
             return "His location is unknown (location permission is off). Ask him where he is."
         lat, lon = here["lat"], here["lon"]
+    try:
+        return _open_meteo(lat, lon, here)
+    except Exception as e:
+        print(f"[WARN] chat weather open-meteo: {type(e).__name__}: {e}", file=sys.stderr)
+        return _met_norway(lat, lon, here)
+
+
+def _met_norway(lat, lon, here):
+    """Backup source (MET Norway), used when Open-Meteo refuses (it rate-limits Render's shared IP)."""
+    r = requests.get("https://api.met.no/weatherapi/locationforecast/2.0/compact",
+                     params={"lat": round(lat, 3), "lon": round(lon, 3)}, headers=weather_agent.HEADERS, timeout=10)
+    r.raise_for_status()
+    series = r.json()["properties"]["timeseries"]
+    def row(t):
+        d = t["data"]["instant"]["details"]
+        rain = (t["data"].get("next_1_hours") or {}).get("details", {}).get("precipitation_amount")
+        return {"time_utc": t["time"][11:16], "temp_c": d.get("air_temperature"),
+                "humidity": d.get("relative_humidity"), "wind_kmh": round(d.get("wind_speed", 0) * 3.6, 1),
+                "rain_mm_next_hour": rain}
+    return {"place": (here or {}).get("place") if lat == (here or {}).get("lat") else None,
+            "now": row(series[0]), "next_hours": [row(t) for t in series[1:8]],
+            "note": "times are UTC"}
+
+
+def _open_meteo(lat, lon, here):
     r = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": lat, "longitude": lon, "timezone": "auto", "forecast_days": 2,
         "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation",
@@ -366,7 +392,8 @@ def turn(user_text, save=True, location=None, past=None):
     else:
         unfinished = True
 
-    answer = clean(answer)
+    # Receipts come only from the server; drop any the model wrote itself (it copies them from history).
+    answer = re.sub(r"\n{3,}", "\n\n", RECEIPT_LINE.sub("", clean(answer))).strip()
     if unfinished:
         answer = (answer + "\n\n" if answer else "") + "⚠️ לא סיימתי את כל השלבים. מה שבוצע בפועל מופיע למטה."
     if not answer and not actions:
@@ -414,11 +441,12 @@ def write_selftest(location=None):
             "turn1_receipt": any("נוצר ביומן" in a for a in past[1]["actions"]),
             "turn3_receipt": any("עודכן ביומן" in a for a in past[5]["actions"]),
             "turn2_used_location": bool(location) and any(w in past[3]["text"] for w in ("°", "מעלות")),
+            "turn3_receipt_once": past[5]["text"].count("✅") == 1,
         }
         # Calling create twice directly must give one event.
+        # The event now sits at 07:30-07:45: creating it again directly must return it, not add one.
         again = calendar_agent.create_event(title, day, "07:30", "07:45")
-        again2 = calendar_agent.create_event(title, day, "07:30", "07:45")
-        report["checks"]["create_is_idempotent"] = (not again["already_existed"]) and again2["already_existed"]
+        report["checks"]["create_is_idempotent"] = bool(found) and again["already_existed"] and again["id"] == found[0]["id"]
     finally:
         for e in calendar_agent.list_events(formatting.DEFAULT_TZ_NAME, 30, title, 1):
             if e.get("summary") == title:
