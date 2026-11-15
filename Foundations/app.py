@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -1601,6 +1601,21 @@ def task_status():
     check("google", google)
     check("push", push)
     check("garmin", garmin)
+    def chat():
+        # No content: only whether the phone's location arrived and how the last reply ended.
+        loc = push_agent.get_config("location") or {}
+        msgs = (push_agent.get_config("chat") or {}).get("messages", [])
+        last = next((m for m in reversed(msgs) if m["role"] == "assistant"), None)
+        age = None
+        if loc.get("at"):
+            age = round((datetime.now(timezone.utc) - datetime.fromisoformat(loc["at"])).total_seconds() / 60)
+        return {"model": chat_agent.MODEL, "effort": chat_agent.EFFORT,
+                "location_known": bool(loc), "location_age_min": age, "location_has_place": bool(loc.get("place")),
+                "location_tz": loc.get("tz"), "messages": len(msgs),
+                "last_reply_actions": len(last.get("actions", [])) if last else None,
+                "last_reply_warning": ("⚠️" in last["text"]) if last else None}
+
+    check("chat", chat)
     report["uni_last_run"] = _uni_check["last"]
     entry = cached_cards(formatting.DEFAULT_TZ_NAME)
     report["cards_cache_age_s"] = round(time.time() - entry["at"]) if entry else None
