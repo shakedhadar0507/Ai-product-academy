@@ -32,6 +32,7 @@ from agents import (
     brief_agent,
     calendar_agent,
     chat_agent,
+    location_agent,
     digest_agent,
     formatting,
     garmin_agent,
@@ -1082,16 +1083,28 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
           var finished = false;
           var timer = setTimeout(function() { if (!finished) { finished = true; resolve(lastLocation()); } }, 4000);
           navigator.geolocation.getCurrentPosition(function(p) {
-            if (finished) return;
-            finished = true; clearTimeout(timer);
             var loc = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy, tz: tz };
             try { localStorage.setItem('hub_loc', JSON.stringify(loc)); } catch (e) {}
+            if (finished) {  // arrived after the message went out (e.g. he was still answering the iPhone prompt)
+              fetch('/chat/location', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(loc) });
+              return;
+            }
+            finished = true; clearTimeout(timer);
             resolve(loc);
           }, function() {
             if (finished) return;
             finished = true; clearTimeout(timer); resolve(lastLocation());
           }, { maximumAge: 600000, timeout: 3500, enableHighAccuracy: false });
         });
+      }
+      // Ask once when the page opens, so the iPhone permission prompt comes before the first question
+      // and the server already knows where he is.
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function(p) {
+          var loc = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy, tz: tz };
+          try { localStorage.setItem('hub_loc', JSON.stringify(loc)); } catch (e) {}
+          fetch('/chat/location', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(loc) });
+        }, function() {}, { maximumAge: 600000, timeout: 30000, enableHighAccuracy: false });
       }
       form.addEventListener('submit', function(e) {
         e.preventDefault();
@@ -1367,6 +1380,12 @@ def chat_selftest():
                         "reply": chat_agent.ask("מה יש לי מחר ביומן, ואיזו משימה הכי דחופה?", save=False)})
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"})
+
+
+@app.route("/chat/location", methods=["POST"])
+def chat_location():
+    loc = location_agent.remember(request.get_json(silent=True) or {})
+    return jsonify({"ok": bool(loc)})
 
 
 @app.route("/chat/history")
