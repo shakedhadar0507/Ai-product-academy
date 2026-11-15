@@ -117,7 +117,7 @@ Now is {now} ({weekday}), in time zone {tz}.
 
 WRITE_TOOLS = {"create_calendar_event", "update_calendar_event", "delete_calendar_event",
                "create_gmail_draft", "add_reminder", "complete_task"}
-CLAIM_WORDS = re.compile(r"(?<!לא )(?<!not )(יצרתי|נוצר|קבעתי|הוספתי|הכנסתי|שמרתי|עדכנתי|מחקתי|הזזתי|סימנתי|\b(created|scheduled|added|saved|updated|deleted|moved)\b)", re.I)
+CLAIM_WORDS = re.compile(r"(?<!לא )(?<!not )(?<![\u0590-\u05FF])(יצרתי|קבעתי|הוספתי|הכנסתי|שמרתי|עדכנתי|מחקתי|הזזתי|סימנתי)(?![\u0590-\u05FF])|(?<!not )\b(I've |I have )?(created|scheduled|added|saved|updated|deleted|moved) (it|the|your|a)\b", re.I)
 RECEIPT_LINE = re.compile(r"^\s*(✅|⚠️|\[).*(\]\s*)?$", re.M)
 DEADLINE_SECONDS = 95
 
