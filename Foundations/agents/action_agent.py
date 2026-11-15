@@ -19,6 +19,7 @@ TOOLS = [
                 "start_time": {"type": "string", "description": "Start time, in 24-hour HH:MM format"},
                 "end_time": {"type": "string", "description": "End time, in 24-hour HH:MM format"},
                 "description": {"type": "string", "description": "Optional event description"},
+                "location": {"type": "string", "description": "Optional place of the event"},
                 "color": {
                     "type": "string",
                     "description": (

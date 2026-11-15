@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      chat_write_test:
+        description: "Also run the Ask Claude write test (creates, moves and deletes a throwaway event a month ahead)"
+        type: boolean
+        default: false
 
 jobs:
   check:
@@ -50,3 +55,13 @@ jobs:
           echo
           curl -sS --max-time 120 -X POST -H "X-Cron-Secret: $CRON_SECRET" \
             https://ai-product-academy.onrender.com/tasks/chat-selftest
+      - name: Ask Claude write test (manual runs with chat_write_test only)
+        if: github.event_name == 'workflow_dispatch' && inputs.chat_write_test
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          echo
+          curl -sS --max-time 300 -X POST -H "X-Cron-Secret: $CRON_SECRET" \
+            "https://ai-product-academy.onrender.com/tasks/chat-selftest?write=1" | tee result.json
+          echo
+          python3 -c "import json,sys; sys.exit(0 if json.load(open('result.json')).get('ok') else 1)"

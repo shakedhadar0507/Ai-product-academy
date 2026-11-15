@@ -1070,19 +1070,49 @@ DASHBOARD_PAGE = """<!DOCTYPE html>
       fetch('/chat/history').then(function(r) { return r.json(); }).then(function(d) {
         (d.messages || []).forEach(function(m) { bubble(m.role, m.text); });
       }).catch(function() {});
+      var button = form.querySelector('button[type=submit]'), busy = false;
+      var tz = (Intl.DateTimeFormat().resolvedOptions() || {}).timeZone || '';
+      function lastLocation() {
+        try { return JSON.parse(localStorage.getItem('hub_loc') || 'null'); } catch (e) { return null; }
+      }
+      function getLocation() {
+        // The phone's position, so answers fit where he is. Never blocks a message for more than 4 seconds.
+        return new Promise(function(resolve) {
+          if (!navigator.geolocation) return resolve(lastLocation());
+          var finished = false;
+          var timer = setTimeout(function() { if (!finished) { finished = true; resolve(lastLocation()); } }, 4000);
+          navigator.geolocation.getCurrentPosition(function(p) {
+            if (finished) return;
+            finished = true; clearTimeout(timer);
+            var loc = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy, tz: tz };
+            try { localStorage.setItem('hub_loc', JSON.stringify(loc)); } catch (e) {}
+            resolve(loc);
+          }, function() {
+            if (finished) return;
+            finished = true; clearTimeout(timer); resolve(lastLocation());
+          }, { maximumAge: 600000, timeout: 3500, enableHighAccuracy: false });
+        });
+      }
       form.addEventListener('submit', function(e) {
         e.preventDefault();
         var text = input.value.trim();
-        if (!text) return;
+        if (!text || busy) return;  // one message at a time: a second tap must not send it again
+        busy = true; button.disabled = true; button.classList.add('opacity-50');
         input.value = '';
         bubble('user', text);
         var wait = bubble('assistant', HUB_T.chat_thinking);
         wait.classList.add('animate-pulse');
-        fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) })
+        getLocation().then(function(loc) {
+          return fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ message: text, location: loc }) });
+        })
           .then(function(r) { return r.json(); })
           .then(function(d) { wait.textContent = d.reply || HUB_T.chat_error; })
           .catch(function() { wait.textContent = HUB_T.chat_error; })
-          .finally(function() { wait.classList.remove('animate-pulse'); log.scrollTop = log.scrollHeight; });
+          .finally(function() {
+            busy = false; button.disabled = false; button.classList.remove('opacity-50');
+            wait.classList.remove('animate-pulse'); log.scrollTop = log.scrollHeight;
+          });
       });
       reset.addEventListener('click', function() {
         fetch('/chat/reset', { method: 'POST' }).then(function() { log.innerHTML = ''; reset.classList.add('hidden'); });
@@ -1313,8 +1343,9 @@ def chat():
     text = str(data.get("message", "")).strip()[:2000]
     if not text:
         return jsonify({"reply": ""})
+    location = data.get("location") if isinstance(data.get("location"), dict) else None
     try:
-        reply = chat_agent.ask(text)
+        reply = chat_agent.ask(text, location=location)
     except Exception as e:
         print(f"[ERROR] chat: {type(e).__name__}: {e}", file=sys.stderr)
         reply = tr(get_lang(), "chat_error")
@@ -1329,7 +1360,11 @@ def chat_selftest():
     if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
         return Response("Forbidden", 403)
     try:
-        return jsonify({"ok": True, "reply": chat_agent.ask("מה יש לי מחר ביומן, ואיזו משימה הכי דחופה?", save=False)})
+        if request.args.get("write") == "1":
+            # Tel Aviv coordinates stand in for the phone; nothing is stored as his location.
+            return jsonify(chat_agent.write_selftest({"lat": 32.0853, "lon": 34.7818, "tz": "Asia/Jerusalem"}))
+        return jsonify({"ok": True, "model": chat_agent.MODEL, "effort": chat_agent.EFFORT,
+                        "reply": chat_agent.ask("מה יש לי מחר ביומן, ואיזו משימה הכי דחופה?", save=False)})
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"})
 
