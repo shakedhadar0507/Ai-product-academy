@@ -38,6 +38,7 @@ from agents import (
     garmin_agent,
     garmin_sync_agent,
     gmail_agent,
+    health_agent,
     google_auth,
     push_agent,
     notes_agent,
@@ -64,7 +65,7 @@ app.config.update(
 # The scheduled check authenticates with CRON_SECRET instead.
 PUBLIC_PATHS = {
     "/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/healthz",
-    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/notes-selftest", "/tasks/digest-preview", "/tasks/chat-selftest",
+    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/health", "/tasks/notes-selftest", "/tasks/digest-preview", "/tasks/chat-selftest",
 }
 
 
@@ -1492,7 +1493,8 @@ def notes_setup():
 PING_EVERY = 10 * 60
 UNI_EVERY = 10 * 60
 GARMIN_EVERY = 2 * 60 * 60
-_background = {"started_at": time.time(), "ticks": 0, "ping": None, "last_uni": 0, "last_garmin": 0, "last_ping": 0}
+_background = {"started_at": time.time(), "ticks": 0, "ping": None, "last_uni": 0, "last_garmin": 0, "last_ping": 0,
+               "last_health": time.time() - health_agent.CHECK_EVERY + 5 * 60}  # first check 5 min after start
 
 
 @app.route("/healthz")
@@ -1551,6 +1553,9 @@ def _background_loop():
             if garmin_sync_agent.is_configured() and now - _background["last_garmin"] >= GARMIN_EVERY:
                 _background["last_garmin"] = now
                 garmin_sync_agent.run_in_background(_after_garmin_sync)
+            if now - _background["last_health"] >= health_agent.CHECK_EVERY:
+                _background["last_health"] = now
+                threading.Thread(target=health_agent.run_safely, daemon=True).start()
         except Exception as e:
             print(f"[ERROR] background: {type(e).__name__}: {e}", file=sys.stderr)
         time.sleep(60)
@@ -1572,6 +1577,22 @@ def start_background():
             _background["started_at"] = time.time()
             threading.Thread(target=_background_loop, daemon=True, name="hub-background").start()
     return None
+
+
+@app.route("/tasks/health", methods=["GET", "POST"])
+def task_health():
+    """POST starts a full health check in the background (?test=1 also pushes when all is
+    fine, to prove alerts reach the phone). GET returns the latest report."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    started = False
+    if request.method == "POST" and not health_agent.is_running():
+        test = request.args.get("test") == "1"
+        threading.Thread(target=health_agent.run_safely, args=(test,), daemon=True).start()
+        started = True
+    return jsonify({"started": started, "running": health_agent.is_running() or started,
+                    "now_ts": time.time(), "last": health_agent.last_result()})
 
 
 @app.route("/tasks/status", methods=["GET", "POST"])
@@ -1636,6 +1657,8 @@ def task_status():
 
     check("chat", chat)
     report["uni_last_run"] = _uni_check["last"]
+    report["health_last"] = health_agent.last_result()
+    report["push_last_send"] = push_agent.last_send()
     entry = cached_cards(formatting.DEFAULT_TZ_NAME)
     report["cards_cache_age_s"] = round(time.time() - entry["at"]) if entry else None
     return jsonify(report)
