@@ -102,8 +102,9 @@ writes in (usually Hebrew), short and direct, plain text with no markdown, aster
 
 How you act:
 - Use the tools to look things up instead of guessing, and to act when he asks.
-- Act only on his newest message. Earlier messages were already handled: every earlier reply ends
-  with a receipt line saying what was actually done. Never redo an action from an earlier message.
+- Act only on his newest message. Every earlier message was already handled, whatever it asked for:
+  replies that did something end with a ✅ receipt line from the app. Never redo an action from an
+  earlier message.
   If he asks to change something you created, update it (update_calendar_event), do not create it again.
 - Never say you did something unless a tool call in this turn returned success for it. If a tool
   failed, say it failed. If no tool can do what he asks, say so plainly. The app appends a receipt of
@@ -117,7 +118,7 @@ Now is {now} ({weekday}), in time zone {tz}.
 WRITE_TOOLS = {"create_calendar_event", "update_calendar_event", "delete_calendar_event",
                "create_gmail_draft", "add_reminder", "complete_task"}
 CLAIM_WORDS = re.compile(r"(?<!לא )(?<!not )(יצרתי|נוצר|קבעתי|הוספתי|הכנסתי|שמרתי|עדכנתי|מחקתי|הזזתי|סימנתי|\b(created|scheduled|added|saved|updated|deleted|moved)\b)", re.I)
-RECEIPT_LINE = re.compile(r"^\s*(✅|⚠️).*$", re.M)
+RECEIPT_LINE = re.compile(r"^\s*(✅|⚠️|\[).*(\]\s*)?$", re.M)
 DEADLINE_SECONDS = 95
 
 
@@ -292,14 +293,8 @@ def receipt(name, args, output):
 
 
 def _model_content(m):
-    """What the model sees for a saved message. A saved assistant reply without any action gets a
-    marker, so the model never mistakes an earlier request for one it still has to carry out."""
-    if m["role"] != "assistant":
-        return m["text"]
-    if "actions" not in m:  # saved before receipts existed: whatever it asked for was already handled
-        return m["text"] + "\n[הבקשה הקודמת כבר טופלה. אל תבצע אותה שוב]"
-    if not m["actions"]:
-        return m["text"] + "\n[בתור הזה לא בוצעה שום פעולה]"
+    """What the model sees for a saved message: its text as saved. (Markers appended here were
+    copied by the model into its own replies, so the rule about earlier messages is in SYSTEM.)"""
     return m["text"]
 
 
