@@ -81,7 +81,7 @@ def compose(slot, facts):
              else "what tomorrow holds and what is still open")
     try:
         response = anthropic.Anthropic().messages.create(
-            model="claude-opus-5-5",
+            model="claude-sonnet-5-5",
             max_tokens=400,
             output_config={"effort": "low"},
             messages=[{"role": "user", "content": PROMPT.format(
