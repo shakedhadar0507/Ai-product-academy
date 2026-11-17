@@ -100,3 +100,24 @@ def reply(message_id, body, send):
     else:
         service.users().drafts().create(userId="me", body={"message": payload}).execute()
     return original["reply_to"]
+
+
+def mark_inbox_read(query="is:unread in:inbox"):
+    """Mark every message matching `query` as read. Returns counts before and after."""
+    service = build("gmail", "v1", credentials=google_auth.get_credentials(google_auth.SCOPES))
+    before = service.users().labels().get(userId="me", id="INBOX").execute().get("messagesUnread")
+    ids, token = [], None
+    while True:
+        resp = service.users().messages().list(
+            userId="me", q=query, maxResults=500, pageToken=token).execute()
+        ids += [m["id"] for m in resp.get("messages", [])]
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    for i in range(0, len(ids), 1000):
+        service.users().messages().batchModify(
+            userId="me", body={"ids": ids[i:i + 1000], "removeLabelIds": ["UNREAD"]}).execute()
+    after = service.users().labels().get(userId="me", id="INBOX").execute().get("messagesUnread")
+    left = service.users().messages().list(userId="me", q=query, maxResults=1).execute()
+    return {"inbox_unread_before": before, "marked": len(ids),
+            "inbox_unread_after": after, "still_matching": len(left.get("messages", []))}

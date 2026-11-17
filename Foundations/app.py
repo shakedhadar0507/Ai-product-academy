@@ -65,7 +65,7 @@ app.config.update(
 # The scheduled check authenticates with CRON_SECRET instead.
 PUBLIC_PATHS = {
     "/login", "/manifest.webmanifest", "/sw.js", "/privacy", "/healthz",
-    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/health", "/tasks/notes-selftest", "/tasks/digest-preview", "/tasks/chat-selftest",
+    "/tasks/check-uni-mail", "/tasks/check-uni", "/tasks/status", "/tasks/health", "/tasks/notes-selftest", "/tasks/digest-preview", "/tasks/chat-selftest", "/tasks/gmail-mark-read",
 }
 
 
@@ -1641,6 +1641,18 @@ def task_health():
         started = True
     return jsonify({"started": started, "running": health_agent.is_running() or started,
                     "now_ts": time.time(), "last": health_agent.last_result()})
+
+
+@app.route("/tasks/gmail-mark-read", methods=["POST"])
+def task_gmail_mark_read():
+    """Mark all unread inbox mail as read (run on demand from GitHub Actions)."""
+    expected = os.environ.get("CRON_SECRET")
+    if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
+        return Response("Forbidden", 403)
+    try:
+        return jsonify(gmail_agent.mark_inbox_read())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {str(e)[:200]}"}), 500
 
 
 @app.route("/tasks/status", methods=["GET", "POST"])
