@@ -242,6 +242,9 @@ STRINGS = {
         "q_calendar": "יומן", "q_event": "אירוע", "q_gmail": "Gmail", "q_moodle": "Moodle", "q_garmin": "Garmin",
         "ask_title": "שאל את Claude",
         "ask_sub": "שאל או בקש: מה יש לי מחר, תזכיר לי, תקבע ביומן, תנסח מייל ועוד.", "chat_new": "שיחה חדשה", "chat_thinking": "חושב…", "chat_error": "משהו השתבש. נסה שוב.",
+        "chat_no_credit": "הצ'אט לא עובד: נגמר הקרדיט בחשבון Anthropic. צריך לטעון ב-console.anthropic.com/settings/billing (ולהפעיל טעינה אוטומטית).",
+        "chat_bad_key": "הצ'אט לא עובד: מפתח ה-API של Anthropic ב-Render לא תקין. צריך מפתח חדש ב-ANTHROPIC_API_KEY.",
+        "chat_busy": "השרת של Anthropic עמוס או לא זמין כרגע. נסה שוב בעוד דקה.",
         "ask_placeholder": "למשל: תקבע רופא שיניים מחר 15:00-16:00", "send": "שלח",
         "loading": "טוען נתונים…", "saved": "(שמור)",
         "brief": "התקציר היומי", "brief_error": "לא הצלחתי ליצור את התקציר היומי",
@@ -281,6 +284,9 @@ STRINGS = {
         "q_calendar": "Calendar", "q_event": "Event", "q_gmail": "Gmail", "q_moodle": "Moodle", "q_garmin": "Garmin",
         "ask_title": "Ask Claude",
         "ask_sub": "Ask or request: what is tomorrow, remind me, schedule, draft an email, and more.", "chat_new": "New chat", "chat_thinking": "Thinking…", "chat_error": "Something went wrong. Try again.",
+        "chat_no_credit": "Chat is down: the Anthropic account is out of credit. Top up at console.anthropic.com/settings/billing (and turn on auto-reload).",
+        "chat_bad_key": "Chat is down: the Anthropic API key on Render is invalid. Set a new ANTHROPIC_API_KEY.",
+        "chat_busy": "Anthropic is busy or unreachable right now. Try again in a minute.",
         "ask_placeholder": "e.g. schedule a dentist appointment tomorrow 15:00-16:00", "send": "Send",
         "loading": "Loading…", "saved": "(saved)",
         "brief": "Daily Brief", "brief_error": "Could not generate the daily brief",
@@ -1363,6 +1369,13 @@ def chat():
     except Exception as e:
         print(f"[ERROR] chat: {type(e).__name__}: {e}", file=sys.stderr)
         reply = tr(get_lang(), "chat_error")
+        msg = str(e).lower()
+        if "credit balance" in msg:
+            reply = tr(get_lang(), "chat_no_credit")
+        elif "authentication" in msg or "api key" in msg or type(e).__name__ == "AuthenticationError":
+            reply = tr(get_lang(), "chat_bad_key")
+        elif type(e).__name__ in ("RateLimitError", "OverloadedError", "InternalServerError", "APIConnectionError", "APITimeoutError"):
+            reply = tr(get_lang(), "chat_busy")
     invalidate_cards()
     return jsonify({"reply": reply})
 
