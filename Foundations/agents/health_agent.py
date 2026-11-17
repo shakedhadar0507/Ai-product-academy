@@ -65,6 +65,9 @@ def check_anthropic():
     except anthropic.BadRequestError as e:
         if "credit" in str(e).lower():
             return ("נגמר הקרדיט ב-Anthropic. צ'אט, סיכום יומי ומיילים לא עובדים עד שתטען", ANTHROPIC_BILLING)
+        if "usage limit" in str(e).lower():
+            return ("הגעת לתקרת ההוצאה החודשית ב-Anthropic. ה-AI באפליקציה חסום עד החודש הבא או עד שתעלה את התקרה",
+                    "https://console.anthropic.com/settings/limits")
         return (f"Anthropic דחה בקשה: {str(e)[:80]}", None)
     except anthropic.APIStatusError as e:
         if e.status_code == 429 and "credit" in str(e).lower():
