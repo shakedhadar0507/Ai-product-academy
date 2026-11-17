@@ -1650,7 +1650,8 @@ def task_gmail_mark_read():
     if not expected or not secrets.compare_digest(request.headers.get("X-Cron-Secret", ""), expected):
         return Response("Forbidden", 403)
     try:
-        return jsonify(gmail_agent.mark_inbox_read())
+        query = (request.get_json(silent=True) or {}).get("query") or "is:unread in:inbox"
+        return jsonify(gmail_agent.mark_inbox_read(query))
     except Exception as e:
         return jsonify({"error": f"{type(e).__name__}: {str(e)[:200]}"}), 500
 

@@ -119,5 +119,5 @@ def mark_inbox_read(query="is:unread in:inbox"):
             userId="me", body={"ids": ids[i:i + 1000], "removeLabelIds": ["UNREAD"]}).execute()
     after = service.users().labels().get(userId="me", id="INBOX").execute().get("messagesUnread")
     left = service.users().messages().list(userId="me", q=query, maxResults=1).execute()
-    return {"inbox_unread_before": before, "marked": len(ids),
+    return {"query": query, "inbox_unread_before": before, "marked": len(ids),
             "inbox_unread_after": after, "still_matching": len(left.get("messages", []))}
