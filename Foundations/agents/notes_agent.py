@@ -92,7 +92,7 @@ def extract(notes, existing):
     now = formatting.now_in_tz()
     client = anthropic.Anthropic()
     response = client.messages.create(
-        model="claude-opus-5-5",
+        model="claude-sonnet-5-5",
         max_tokens=2048,
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
         messages=[{"role": "user", "content": PROMPT.format(

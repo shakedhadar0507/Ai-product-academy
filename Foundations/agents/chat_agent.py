@@ -21,7 +21,7 @@ from googleapiclient.discovery import build
 from agents import (action_agent, calendar_agent, formatting, garmin_agent, gmail_agent, google_auth,
                     location_agent, push_agent, uni_agent, weather_agent)
 
-MODEL = "claude-opus-5-5"
+MODEL = "claude-sonnet-5-5"  # half the price of Opus; strong enough for the chat's tool use
 EFFORT = "medium"
 MAX_TURNS = 20
 MAX_STEPS = 10
@@ -112,8 +112,8 @@ How you act:
 - Before creating events or reminders, make sure the date and time are clear; if not, ask.
 - Mail is never sent: you can only save Gmail drafts, so say "saved as a draft".
 
-Now is {now} ({weekday}), in time zone {tz}.
-{location}"""
+The current time, time zone and his location are given at the start of his newest message, in a
+"Context:" line written by the app (not by him)."""
 
 WRITE_TOOLS = {"create_calendar_event", "update_calendar_event", "delete_calendar_event",
                "create_gmail_draft", "add_reminder", "complete_task"}
@@ -337,20 +337,22 @@ def turn(user_text, save=True, location=None, past=None):
     while past and past[0]["role"] != "user":
         past = past[1:]
     messages = [{"role": m["role"], "content": _model_content(m)} for m in past]
-    messages.append({"role": "user", "content": user_text})
-
     here = location_agent.current(location, store=save)
     tz = (here or {}).get("tz") or formatting.DEFAULT_TZ_NAME
     now = formatting.now_in_tz(tz)
-    system = SYSTEM.format(now=now.strftime("%Y-%m-%d %H:%M"), weekday=now.strftime("%A"), tz=tz,
-                           location=_location_line(here))
+    # The system prompt stays the same on every call so it can be cached; what changes (time,
+    # place) goes in front of the newest message.
+    context = (f"Context: now is {now.strftime('%Y-%m-%d %H:%M')} ({now.strftime('%A')}), time zone {tz}. "
+               f"{_location_line(here)}")
+    messages.append({"role": "user", "content": f"{context}\n\n{user_text}"})
+    system = SYSTEM
     client = anthropic.Anthropic(timeout=60, max_retries=1)
     functions, answer, actions, done_keys = _tool_functions(tz, here), "", [], set()
     started, unfinished = time.monotonic(), False
     for step in range(MAX_STEPS):
         response = client.messages.create(
             model=MODEL, max_tokens=4000, system=system, tools=TOOLS, messages=messages,
-            output_config={"effort": EFFORT},
+            output_config={"effort": EFFORT}, cache_control={"type": "ephemeral"},
         )
         if response.stop_reason == "refusal":
             answer = answer or "לא יכול לעזור עם זה."

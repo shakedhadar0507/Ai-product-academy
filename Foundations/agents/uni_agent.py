@@ -237,7 +237,7 @@ Subject: {subject}
 def classify_mail(sender, subject, sent_at, text):
     client = anthropic.Anthropic()
     response = client.messages.create(
-        model="claude-opus-5-5",
+        model="claude-sonnet-5-5",
         max_tokens=1024,
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": MAIL_SCHEMA}},
         messages=[{"role": "user", "content": MAIL_PROMPT.format(
@@ -452,7 +452,7 @@ def setup_status():
     """What is configured, so a scheduled run's response shows what still needs fixing."""
     status = {"moodle_link": is_configured()}
     try:
-        anthropic.Anthropic().models.retrieve("claude-opus-5-5")
+        anthropic.Anthropic().models.retrieve("claude-sonnet-5-5")
         status["anthropic_key"] = "ok"
     except anthropic.AuthenticationError:
         status["anthropic_key"] = "invalid"
