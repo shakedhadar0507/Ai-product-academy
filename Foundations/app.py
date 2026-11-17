@@ -243,6 +243,7 @@ STRINGS = {
         "ask_title": "שאל את Claude",
         "ask_sub": "שאל או בקש: מה יש לי מחר, תזכיר לי, תקבע ביומן, תנסח מייל ועוד.", "chat_new": "שיחה חדשה", "chat_thinking": "חושב…", "chat_error": "משהו השתבש. נסה שוב.",
         "chat_no_credit": "הצ'אט לא עובד: נגמר הקרדיט בחשבון Anthropic. צריך לטעון ב-console.anthropic.com/settings/billing (ולהפעיל טעינה אוטומטית).",
+        "chat_limit": "הצ'אט לא עובד: הגעת לתקרת ההוצאה החודשית שהגדרת ב-Anthropic. אפשר להעלות אותה ב-console.anthropic.com/settings/limits.",
         "chat_bad_key": "הצ'אט לא עובד: מפתח ה-API של Anthropic ב-Render לא תקין. צריך מפתח חדש ב-ANTHROPIC_API_KEY.",
         "chat_busy": "השרת של Anthropic עמוס או לא זמין כרגע. נסה שוב בעוד דקה.",
         "ask_placeholder": "למשל: תקבע רופא שיניים מחר 15:00-16:00", "send": "שלח",
@@ -285,6 +286,7 @@ STRINGS = {
         "ask_title": "Ask Claude",
         "ask_sub": "Ask or request: what is tomorrow, remind me, schedule, draft an email, and more.", "chat_new": "New chat", "chat_thinking": "Thinking…", "chat_error": "Something went wrong. Try again.",
         "chat_no_credit": "Chat is down: the Anthropic account is out of credit. Top up at console.anthropic.com/settings/billing (and turn on auto-reload).",
+        "chat_limit": "Chat is down: the monthly spend limit you set at Anthropic was reached. Raise it at console.anthropic.com/settings/limits.",
         "chat_bad_key": "Chat is down: the Anthropic API key on Render is invalid. Set a new ANTHROPIC_API_KEY.",
         "chat_busy": "Anthropic is busy or unreachable right now. Try again in a minute.",
         "ask_placeholder": "e.g. schedule a dentist appointment tomorrow 15:00-16:00", "send": "Send",
@@ -1372,6 +1374,8 @@ def chat():
         msg = str(e).lower()
         if "credit balance" in msg:
             reply = tr(get_lang(), "chat_no_credit")
+        elif "usage limit" in msg:
+            reply = tr(get_lang(), "chat_limit")
         elif "authentication" in msg or "api key" in msg or type(e).__name__ == "AuthenticationError":
             reply = tr(get_lang(), "chat_bad_key")
         elif type(e).__name__ in ("RateLimitError", "OverloadedError", "InternalServerError", "APIConnectionError", "APITimeoutError"):
