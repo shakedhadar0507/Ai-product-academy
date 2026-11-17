@@ -187,6 +187,37 @@ PWA_HEAD_TAGS = """
         if ('serviceWorker' in navigator) {
           window.addEventListener('load', function() { navigator.serviceWorker.register('/sw.js'); });
         }
+        // On the iPhone, links to Gmail, Google Calendar, Garmin Connect and Moodle open the installed
+        // app instead of the website. If the app doesn't open within 1.5 seconds, the website opens.
+        (function() {
+          if (!/iPhone|iPad|iPod/.test(navigator.userAgent)) return;
+          function appUrl(href) {
+            var u;
+            try { u = new URL(href, location.href); } catch (e) { return null; }
+            var h = u.hostname;
+            if (h === 'mail.google.com') return 'googlegmail://';
+            if (h === 'calendar.google.com' || (h === 'www.google.com' && u.pathname.indexOf('/calendar') === 0)) return 'googlecalendar://';
+            if (h === 'connect.garmin.com') return 'gcm-ciq://';
+            if (h.indexOf('moodle') !== -1) return 'moodlemobile://link=' + u.href;
+            return null;
+          }
+          document.addEventListener('click', function(e) {
+            var a = e.target.closest && e.target.closest('a[href]');
+            if (!a) return;
+            var app = appUrl(a.getAttribute('href'));
+            if (!app) return;
+            e.preventDefault();
+            var web = a.href, left = false;
+            function gone() { if (document.hidden) left = true; }
+            document.addEventListener('visibilitychange', gone);
+            window.addEventListener('pagehide', function() { left = true; }, { once: true });
+            setTimeout(function() {
+              document.removeEventListener('visibilitychange', gone);
+              if (!left) window.open(web, '_blank');
+            }, 1500);
+            window.location.href = app;
+          }, true);
+        })();
       </script>
 """
 
