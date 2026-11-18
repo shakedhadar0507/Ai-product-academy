@@ -109,8 +109,16 @@ def check_moodle():
         uni_agent._events_cache["events"] = None  # read it fresh, not from the 5-minute cache
         uni_agent.get_upcoming()
         return None
-    except ValueError:
-        return ("קישור Moodle לא מחזיר יומן. צריך קישור ייצוא חדש (export_execute.php) ב-Render", None)
+    except ValueError as e:
+        detail = str(e)
+        if "not_export_link" in detail or "no_token" in detail:
+            why = "הקישור ב-Render הוא לא קישור הייצוא (export_execute.php עם authtoken)"
+        elif "login_redirect" in detail:
+            why = "Moodle שולח לדף התחברות, כלומר הטוקן בקישור לא תקף. צריך קישור ייצוא חדש"
+        else:
+            why = "צריך קישור ייצוא חדש (export_execute.php)"
+        print(f"[WARN] health moodle: {detail[:300]}", file=sys.stderr)
+        return (f"קישור Moodle לא מחזיר יומן: {why}. פרטים: {detail.split(': ', 1)[-1][:200]}", None)
     except requests.HTTPError as e:
         code = e.response.status_code if e.response is not None else "?"
         return (f"Moodle מחזיר שגיאה {code}. אולי הקישור פג או שנה אקדמית חדשה", None)
