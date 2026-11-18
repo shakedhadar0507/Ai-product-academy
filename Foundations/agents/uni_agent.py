@@ -112,13 +112,39 @@ def parse_ical(text):
     return events
 
 
+def describe_link_problem(response):
+    """Why MOODLE_ICAL_URL gave a web page instead of a calendar, without ever showing the
+    link itself (it holds his personal token): which page it is, where it redirected, the
+    page title."""
+    from urllib.parse import urlparse
+    link = os.environ.get("MOODLE_ICAL_URL", "")
+    final = urlparse(response.url or "")
+    page = final.path.rsplit("/", 1)[-1]
+    if "export_execute.php" not in link:
+        reason = "not_export_link"      # e.g. the export page or the calendar page itself
+    elif "authtoken=" not in link:
+        reason = "no_token"
+    elif "login" in final.path:
+        reason = "login_redirect"       # Moodle did not accept the token
+    else:
+        reason = "other_page"
+    title = ""
+    text = response.text or ""
+    start = text.lower().find("<title>")
+    if start != -1:
+        end = text.lower().find("</title>", start)
+        title = " ".join(text[start + 7:end].split())[:60]
+    return (f"{reason}; status {response.status_code}; type {response.headers.get('Content-Type', '?')}; "
+            f"redirects {len(response.history)}; ended on {final.netloc}{final.path}; page '{page}'; title '{title}'")
+
+
 def get_upcoming(days=60):
     """Upcoming Moodle events, soonest first (cached for 5 minutes)."""
     if _events_cache["events"] is None or time.time() - _events_cache["at"] > EVENTS_CACHE_SECONDS:
         response = requests.get(os.environ["MOODLE_ICAL_URL"].strip(), timeout=20)
         response.raise_for_status()
         if "BEGIN:VCALENDAR" not in response.text:
-            raise ValueError(f"not a calendar (got {response.headers.get('Content-Type', '?')})")
+            raise ValueError(f"not a calendar: {describe_link_problem(response)}")
         _events_cache.update(at=time.time(), events=parse_ical(response.text))
     now = datetime.now(timezone.utc)
     upcoming = [e for e in _events_cache["events"] if now <= e["due"] <= now + timedelta(days=days)]
@@ -384,7 +410,7 @@ def _reminders(fresh_keys):
 def _moodle_error(e):
     status = getattr(getattr(e, "response", None), "status_code", None)
     # ValueError text is ours or a date format, never the link (which holds a token).
-    detail = f" {status}" if status else (f" {str(e)[:80]}" if isinstance(e, ValueError) else "")
+    detail = f" {status}" if status else (f" {str(e)[:300]}" if isinstance(e, ValueError) else "")
     return f"moodle: {type(e).__name__}{detail}"
 
 
